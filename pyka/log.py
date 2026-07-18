@@ -1,5 +1,5 @@
 """Append-only record log backed by a single file."""
-
+import os
 from pathlib import Path
 import struct
 from collections.abc import Iterator
@@ -44,23 +44,33 @@ class Log():
         header = struct.pack(">I", len(value))
         offset = self._file.tell()
         self._file.write(header + value)
+        self._file.flush()
         return offset
+
+    def sync(self) -> None:
+        os.fsync(self._file.fileno())
 
     def read_from(self, offset: int) -> Iterator[bytes]:
         with open(self._path, "rb") as f:
             f.seek(offset)
             while True:
                 header = f.read(4)
-                if not header:
+                if len(header) != 4:
                     break
                 (length,) = struct.unpack(">I", header)
-                yield f.read(length)
+                payload = f.read(length)
+                if len(payload) != length:
+                    break
+                yield payload
 
     def close(self) -> None:
         """Close the write handle, flushing buffered records to disk.
 
         :return: None
         """
+        if self._file.closed:
+            return
+        self.sync()
         self._file.close()
 
     def __iter__(self) -> Iterator[bytes]:
