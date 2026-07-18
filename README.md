@@ -9,8 +9,8 @@ simple JSON-lines protocol (not Kafka's wire protocol). Max UI: a TUI, later.
 ## Roadmap
 
 ### Phase A — the log (files only, no network)
-- [ ] A1: `Log` class — append length-prefixed records to a file, iterate them back
-- [ ] A2: offsets — `append()` returns a byte offset; `read_from(offset)` seeks and streams
+- [x] A1: `Log` class — append length-prefixed records to a file, iterate them back
+- [x] A2: offsets — `append()` returns a byte offset; `read_from(offset)` seeks and streams
 - [ ] A3: durability — crash-safe flushing; replay a half-written tail without dying
 - [ ] A4: `Topic` — one directory, one log per topic name
 
