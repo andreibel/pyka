@@ -45,6 +45,7 @@ class Log():
         offset = self._file.tell()
         self._file.write(header + value)
         self._file.flush()
+        self.sync()
         return offset
 
     def sync(self) -> None:
