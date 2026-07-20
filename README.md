@@ -81,17 +81,25 @@ seek/write/offset-increment before B2 lands.
                      │ owns one
                      ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ Index                                                NOT WRITTEN   │
+│ Index                                       «private to Segment»   │
 ├────────────────────────────────────────────────────────────────────┤
-│ sparse map: logical offset -> byte position. One entry per ~4KB.   │
-│ Derived and rebuildable — NEVER the source of truth.               │
+│ An array of 8-byte entries: (rel_off u32, position u32), big-      │
+│ endian, no header. Entry n is at byte n*8 — so lookup is a binary  │
+│ search, not a scan. One entry per ~4 KiB of log.                   │
+│ A HINT: always verified against the log, never trusted. Derived    │
+│ and rebuildable, therefore no crc — repair is rebuild, not raise.  │
 ├────────────────────────────────────────────────────────────────────┤
-│ + append(offset, position) -> None                                 │
-│ + lookup(offset) -> int      greatest entry <= offset; scan onward  │
-│ + rebuild(segment) -> None              after an unclean shutdown  │
+│ - base_offset:    Offset  from the filename; rel_off is vs. this   │
+│ - interval_bytes: int     sparsity threshold, default 4096         │
+├────────────────────────────────────────────────────────────────────┤
+│ + maybe_append(offset, position) -> None  no-op until 4 KiB passed │
+│ + lookup(offset) -> (Offset, Position)    greatest entry <= offset │
+│ + clear() -> None                         before a rebuild scan    │
+│ + last_entry() -> (Offset, Position) | None                        │
+│ + sync() / close() / __len__                                       │
 └────────────────────────────────────────────────────────────────────┘
-                     ▲ many
-                     │
+                     ▲ many Segments (each with its own private Index —
+                     │ Log never sees or touches an Index)
 ┌────────────────────────────────────────────────────────────────────┐
 │ Log                                                  NOT WRITTEN   │
 ├────────────────────────────────────────────────────────────────────┤
@@ -199,6 +207,57 @@ invariant `PREFIX_SIZE + size == Record.size()` must always hold.
 - **A new segment's `base_offset` must equal the next offset**, since `append`
   rejects any record whose offset is not sequential. `Log` rolls with
   `Segment(dir, self._next_offset)`.
+
+## Index decisions
+
+- **Fixed-width 8-byte entries, so the file *is* an array.** No framing, no
+  header, no length field: entry *n* lives at byte `n * 8`, and
+  `entry_count == file_size // 8`. That arithmetic is what makes `lookup` a
+  binary search instead of a scan — an index you had to scan would cost the
+  same as scanning the log, i.e. nothing.
+- **`(rel_off u32, position u32)`, relative to `base_offset`.** Absolute
+  offsets would need `i64` and double the entry to 16 bytes. `base_offset`
+  is already recoverable from the filename, so relative is free. The
+  encoding stays internal: `lookup()` takes and returns absolute `Offset`s.
+- **u32 caps a segment at 4 GiB and ~4 billion records.** The entry format
+  and `max_bytes` are one decision, not two — which is exactly why Kafka's
+  `segment.bytes` defaults to 1 GB. Our default is 1 GiB for the same reason.
+- **Big-endian (`>`) like everything else here.** Readable in a hex dump,
+  machine-independent, and the `>` prefix also disables struct's alignment
+  padding so `calcsize` is exactly the sum of the fields.
+- **No crc — the index is a hint, never an authority.** Every `lookup` result
+  is verified against the offset field in the `.log` before use, and a
+  mismatch falls back to a full scan. The index therefore *cannot* cause a
+  wrong answer; the worst it can do is fail to make things fast. This is the
+  property that makes corruption a rebuild rather than an error, and it is
+  why `offset` sits outside the crc-covered region in the record format.
+- **Three self-checks, all arithmetic.** `file_size % 8 != 0` means a torn
+  entry (truncate down to the nearest multiple of 8); `rel_off` must be
+  strictly increasing; and the hint must verify against the log. None of
+  these needs a checksum.
+- **`Segment` owns the `Index`; `Log` must not know indexes exist.**
+  Ownership follows the invariant: *every entry points at a real record
+  boundary in this `.log`*. Only `Segment` writes both files and can scan the
+  log to repair them. Any split makes `Log` a co-guarantor of an invariant it
+  cannot check without doing `Segment`'s job — and forces the
+  verify-and-fall-back logic to straddle the boundary.
+- **`Segment`'s public API does not change.** The index is pure internal
+  acceleration: `read_from` gets faster, no signature moves. A correctly
+  placed optimization is invisible from outside.
+- **`Index` owns the sparsity rule, not `Segment`.** `maybe_append` is called
+  after every append and decides for itself, using the last position it
+  recorded. `Segment` tracking a `_bytes_since_index` counter would leak index
+  policy into the class that shouldn't care. The name is honest: most calls
+  do nothing.
+- **`Index` never imports `Record` or `Segment`.** It rebuilds by being *fed*
+  from the scan `_recover()` already runs (`clear()`, then `maybe_append` per
+  record) rather than reading the log itself. Keeps it independently testable
+  and ignorant of the log format. If `Index` can't be tested without building
+  a `Segment`, the delegation has degenerated into coupling.
+- **Rebuilt on every open, for now.** `_recover()` already walks the whole
+  file, so rebuilding rides along for free. Trusting the index to *seed* the
+  scan needs a clean-shutdown marker we don't have yet — that's the
+  optimization to measure later, not now.
 
 ## Roadmap
 
