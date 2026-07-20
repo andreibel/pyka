@@ -64,15 +64,19 @@ seek/write/offset-increment before B2 lands.
          │ raises CorruptRecord(ValueError) when the bytes are wrong
          ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ Segment                                              NOT WRITTEN   │
+│ Segment                                                            │
 ├────────────────────────────────────────────────────────────────────┤
-│ + base_offset: int        first logical offset in this segment     │
-│ + path:        Path       <base_offset:020d>.log + .index          │
+│ - base_offset: Offset     first logical offset; also the filename  │
+│ - next_offset: Offset     what the next appended record gets       │
+│ - position:    Position   current end of file                      │
+│ - max_bytes:   int        roll threshold, SOFT (default 1 GiB)     │
 ├────────────────────────────────────────────────────────────────────┤
-│ + append(record) -> int                 byte position written at   │
-│ + read_from(offset) -> Iterator[Record]                            │
-│ + is_full(limit) -> bool                time to roll?              │
-│ + recover() -> int                      truncate a torn tail       │
+│ + append(record) -> Position     byte position it starts at        │
+│ + read_from(offset) -> Iterator[Record]      absolute offsets only │
+│ + has_room_for(record) -> bool   ask BEFORE appending              │
+│ + is_full() -> bool                                                │
+│ + sync() / close() / __enter__ / __exit__                          │
+│ - _recover() -> (Offset, Position)   runs in __init__, truncates   │
 └────────────────────────────────────────────────────────────────────┘
                      │ owns one
                      ▼
@@ -150,18 +154,57 @@ invariant `PREFIX_SIZE + size == Record.size()` must always hold.
   length is merely wasteful; when the same framing reads from a socket in
   phase B, an unchecked length is a remote OOM with four bytes of input.
 
-### Not decided yet
+## Segment decisions
 
-`read_one` returning `None` after a partial body read leaves the file position
-*mid-record*. The caller must capture `f.tell()` before each call to recover.
-Whether `read_one` should instead seek back and be non-destructive is open —
-Kafka leaves it to the recovery logic.
+- **`_recover()` runs inside `__init__`.** A segment that has not recovered
+  cannot be appended to safely, so the invalid state is made unconstructible
+  rather than left to a method the caller must remember to call.
+- **A torn tail is truncated, not merely skipped.** If the garbage stayed, the
+  next append would land *after* it and permanently embed an unreadable hole
+  in the middle of the file. This is why recovery must precede any append.
+- **`read_one` does not rewind.** It leaves the file position mid-record on a
+  torn tail; the caller captures `f.tell()` after each success instead. Kafka
+  leaves this to the recovery logic too. *(Resolves the earlier open question.)*
+- **Offsets are verified for continuity while scanning.** `offset` sits outside
+  the crc-covered region, so a bit flip there is invisible to the checksum.
+  Offsets within a segment are strictly sequential, so `rec.offset ==
+  next_offset` is the check that catches it.
+- **Mid-file corruption is fatal.** `CorruptRecord` during recovery makes the
+  segment unopenable. Kafka instead truncates at the corruption point and
+  loses the tail; we prefer loud over silent data loss. Revisit if it proves
+  too brittle.
+- **`sync()` flushes before `fsync`.** `os.fsync` pushes OS→disk and cannot see
+  Python's buffer. Calling it alone syncs nothing — a durability bug that only
+  appears after a power cut.
+- **`max_bytes` is a SOFT limit.** An empty segment accepts any record, however
+  large; otherwise a record bigger than `max_bytes` would roll forever,
+  creating empty segments until the disk fills. A segment can therefore reach
+  `max_bytes + (largest record) - 1`. Do not size buffers off `max_bytes`.
+- **`Log` asks `has_room_for()` before appending**, rather than `Segment`
+  rejecting an oversized write. Keeps `append` a plain write and puts the
+  rolling decision in the layer that can act on it.
+- **`read_from` takes absolute offsets only.** No relative/absolute flag: one
+  `int` with two meanings turns a loud error into a silent wrong answer.
+  Relative offsets belong *inside* `Index`'s file format, where storing
+  `offset - base_offset` as u32 halves the entry size — never in a public API.
+- **`read_from` validates eagerly.** A function containing `yield` executes
+  nothing until the first `next()`, so the bounds check lives in a plain
+  wrapper that returns a private generator.
+- **`Offset` and `Position` are distinct `NewType`s.** Both are `int` at
+  runtime; the distinction exists so `read_from(segment.append(r))` — a byte
+  position used as a record number — is a type error rather than wrong data.
+- **`Segment` does not create its parent directory.** `Log`/`Topic` owns
+  directory creation; a segment silently `mkdir -p`-ing puts log files in
+  surprising places.
+- **A new segment's `base_offset` must equal the next offset**, since `append`
+  rejects any record whose offset is not sequential. `Log` rolls with
+  `Segment(dir, self._next_offset)`.
 
 ## Roadmap
 
 ### Phase A — the log (files only, no network)
 - [x] A1: `Record` — framing, crc, encode/decode/read_one, torn-tail handling
-- [ ] A2: `Segment` — one `.log` file per base offset, roll at a size limit
+- [x] A2: `Segment` — one `.log` file per base offset, roll at a size limit
 - [ ] A3: `Index` — sparse offset→position map, rebuildable
 - [ ] A4: `Log` — many segments, logical offsets, recovery on open
 - [ ] A5: `Topic` — a directory of logs, one per topic name

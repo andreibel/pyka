@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 from typing import BinaryIO, ClassVar
 
+from pyka.storage.types import Offset, Position
+
 
 # On-disk layout (Kafka v1, minus magic/attributes/compression).
 #
@@ -36,7 +38,7 @@ class CorruptRecord(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Record:
-    offset: int
+    offset: Offset
     timestamp: int
     key: bytes | None
     value: bytes | None  # None = tombstone (deletion marker for a compacted log) | None
@@ -73,7 +75,7 @@ class Record:
         )
 
     @classmethod
-    def decode(cls, buf: bytes, pos: int = 0) -> Record:
+    def decode(cls, buf: bytes, pos: Position = Position(0)) -> Record:
         (offset, size) = struct.unpack_from(cls.PREFIX, buf, pos)
         if size > cls.MAX_SIZE:
             raise CorruptRecord(f"size {size} exceeds MAX_SIZE at pos {pos}")
@@ -111,7 +113,7 @@ class Record:
         # (B) -1 means absent, not empty — branch on the declared length, never the bytes
         key = key_bytes if klen != cls.NULL else None
         value = value_bytes if vlen != cls.NULL else None
-        return cls(offset, timestamp, key, value)
+        return cls(Offset(offset), timestamp, key, value)
 
     @classmethod
     def read_one(cls, f: BinaryIO) -> Record | None:
