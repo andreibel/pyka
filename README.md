@@ -276,7 +276,7 @@ production message bus.
 
 ```sh
 uv sync --all-extras
-uv run pytest                       # 479 tests
+uv run pytest                       # 482 tests
 ./scripts/gen_proto.sh              # regenerate stubs after editing the .proto
 uv run python bench/bench_seek.py   # the index benchmark
 ./scripts/cluster.sh start 3        # a local three-broker cluster

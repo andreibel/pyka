@@ -2,7 +2,7 @@
 # The distribution name is NOT "pyka": that is taken on PyPI, by (of all
 # things) an Apache Kafka client. The import name stays `pyka`.
 name = "pyka-log"
-version = "0.1.1"
+version = "0.1.2"
 description = "A mini Kafka: append-only log storage with a gRPC broker, built to learn"
 readme = "README.md"
 requires-python = ">=3.12"
