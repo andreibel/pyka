@@ -1,10 +1,10 @@
 # pyKA
 
 A mini Kafka, built from scratch to learn Python: an append-only log storage
-engine first, an asyncio TCP broker on top of it second.
+engine first, a gRPC broker on asyncio on top of it second.
 
-Rules of the project: single node, no replication, our own simple JSON-lines
-protocol (not Kafka's wire protocol). Max UI: a TUI, later.
+Rules of the project: single node, no replication, our own gRPC/protobuf API
+(not Kafka's wire protocol). Max UI: a TUI, later.
 
 ## Architecture
 
@@ -16,8 +16,9 @@ Four layers. Each one only knows about the layer below it.
 │                      partition -> node. NOT IMPLEMENTED,    │
 │                      placeholder for the stretch phase.     │
 ├─────────────────────────────────────────────────────────────┤
-│ Layer 3  broker/     asyncio TCP. server / protocol /       │
-│                      handler / store. The only async code.  │
+│ Layer 3  broker/     gRPC on asyncio. server / protocol /   │
+│                      handler / store. The only async code,  │
+│                      and the only place with dependencies.  │
 ├─────────────────────────────────────────────────────────────┤
 │ Layer 2  topic/      policy: which Log a record goes to,    │
 │                      when to fsync. topic / partitioner /   │
@@ -423,8 +424,8 @@ invariant `PREFIX_SIZE + size == Record.size()` must always hold.
 - [x] A4: `Log` — many segments, logical offsets, recovery on open
 - [x] A5: `Topic` — a directory of logs, one per topic name
 
-### Phase B — the broker (asyncio TCP)
-- [ ] B1: server accepts connections, speaks JSON-lines
+### Phase B — the broker (gRPC on asyncio)
+- [ ] B1: `.proto` defined, stubs generated, `grpc.aio` server with health
 - [ ] B2: `produce` command appends to a topic's log
 - [ ] B3: `consume` command streams records from an offset
 - [ ] B4: live tail — consumers get new records as they arrive

@@ -1,9 +1,10 @@
 # CLAUDE.md — pyKA working rules
 
-pyKA is a **learning project**: a mini Kafka (append-only log storage, then an
-asyncio TCP broker) that Andrei builds to grow his Python skills. The goal is
-his understanding, not shipped features. A previous project failed because the
-AI generated too much code too fast and he lost track of it. Do not repeat that.
+pyKA is a **learning project**: a mini Kafka (append-only log storage, then a
+gRPC broker on asyncio) that Andrei builds to grow his Python skills. The goal
+is his understanding, not shipped features. A previous project failed because
+the AI generated too much code too fast and he lost track of it. Do not repeat
+that.
 
 ## The one rule that overrides everything
 
@@ -23,10 +24,14 @@ AI generated too much code too fast and he lost track of it. Do not repeat that.
 
 ## Project scope (guardrails — do not expand)
 
-Single node. No replication. One log per topic (no partitions until the
-stretch phase). Custom JSON-lines protocol over TCP — NOT Kafka's wire
-protocol. No UI beyond an optional Textual TUI, late. Stdlib only for
-phases A–C (pytest is the only dev dependency; Textual may join for the TUI).
+Single node. No replication. Partitions **are** implemented (A5): one `Log` is
+one topic-partition, routed by key hash at layer 2 — but nothing below layer 2
+knows partitions exist. **gRPC + protobuf** for the broker — NOT Kafka's wire
+protocol. No UI beyond an optional Textual TUI, late.
+
+Dependencies: stdlib only for layers 1–2 (storage, topic). Layer 3 may use
+`grpcio` / `grpcio-tools` / `protobuf`; pytest is the only dev dependency;
+Textual may join for the TUI. Nothing else without asking.
 
 The roadmap with milestones lives in README.md — keep it checked off as
 milestones land, and keep it the single source of truth for "where are we."
