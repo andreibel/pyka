@@ -18,7 +18,7 @@ import uvicorn
 from pyka.broker.admin import create_app
 from pyka.broker.server import DEFAULT_GRACE, DEFAULT_PORT, BrokerServer
 from pyka.broker.store import Store
-from pyka.cluster.ring import Ring
+from pyka.cluster.ring import HashRing, Ring
 from pyka.topic.policy import SyncPolicy
 
 log = logging.getLogger(__name__)
@@ -33,13 +33,17 @@ def _store_from_env() -> Store:
     The data root is a mounted volume in Kubernetes — a PersistentVolumeClaim
     that outlives the pod. Nothing here knows that; it is an ordinary path.
     """
+    # HashRing by default: modulo moves ~90% of partitions when the cluster
+    # resizes and puts partition 0 of every topic on broker 0. Ring is kept
+    # for the comparison, selectable for anyone who wants the simpler rule.
+    ring_class = Ring if os.environ.get("PYKA_RING") == "modulo" else HashRing
     try:
-        ring = Ring.from_env()
+        ring = ring_class.from_env()
     except ValueError:
         # No StatefulSet ordinal in the hostname — running on a laptop, or in
         # a Deployment, which this design deliberately does not support for
         # more than one replica.
-        ring = Ring(brokers=1, me=0)
+        ring = ring_class(brokers=1, me=0)
 
     return Store(
         root=Path(os.environ.get("PYKA_DATA_DIR", DEFAULT_ROOT)),
@@ -50,6 +54,7 @@ def _store_from_env() -> Store:
         ),
         max_segment_bytes=int(os.environ.get("PYKA_SEGMENT_BYTES", 1 << 30)),
         ring=ring,
+        allow_orphans=os.environ.get("PYKA_ALLOW_ORPHANS") == "1",
     )
 
 
@@ -82,8 +87,15 @@ async def serve() -> None:
     # returns 503 until recovery finishes — a scan of every segment on the
     # volume, ~15 s/GiB. This is the gap a naive probe turns into a crash loop.
     await store.open()
-    grpc_server.set_serving(True)
-    log.info("ready")
+    # Both probes must agree. store.open() can decline to become ready — it
+    # refuses when this broker holds partitions it no longer owns — and gRPC
+    # health saying SERVING while /readyz says 503 would let a k8s gRPC probe
+    # route traffic to a broker the HTTP probe is holding back.
+    grpc_server.set_serving(store.ready)
+    if store.ready:
+        log.info("ready")
+    else:
+        log.error("NOT ready — serving nothing until this is resolved")
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

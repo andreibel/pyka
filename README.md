@@ -31,8 +31,10 @@ producing and consuming end to end, with diagrams.
 └─────────────────────────────────────────────────────────────┘
 
   cluster/ring.py  is NOT a layer above these. It imports nothing and is
-  imported BY the broker: a leaf lookup table, partition -> broker ordinal.
+  imported BY the broker: a leaf lookup table, (topic, partition) -> broker.
   A cluster is N copies of this same process, not a tier on top of one.
+  Ring = p % n (naive, kept for comparison); HashRing = consistent hashing
+  with virtual nodes, and the default.
 ```
 
 ### Sync or async?
@@ -443,8 +445,9 @@ invariant `PREFIX_SIZE + size == Record.size()` must always hold.
 - [ ] D1: Dockerfile, non-root, `PYKA_DATA_DIR` as a volume
 - [ ] D2: StatefulSet `replicas: 1` + headless Service + PVC + gRPC probes
 - [ ] D3: `kubectl delete pod` → watch recovery rebuild state from the PVC
-- [ ] D4: `Metadata` RPC + client-side partitioning (~50 lines; where `Ring` gets a caller)
-- [ ] D5: `replicas: 3` — real sharding, then **kill a pod and watch a partition go dark**
+- [x] D4: `Metadata` RPC + client-side partitioning + ownership redirects
+- [x] D4b: consistent hashing (`HashRing`), orphaned-partition detection
+- [ ] D5: `replicas: 3` in Kubernetes — then **kill a pod and watch a partition go dark**
 
 ### Phase C — consumer offsets
 - [ ] C1: broker tracks each consumer group's committed offset
@@ -536,6 +539,62 @@ curl -s localhost:8080/topics/orders/partitions/0 | python3 -m json.tool
 grpcurl -plaintext localhost:9092 list
 ```
 
+### Running a cluster
+
+```sh
+./scripts/cluster.sh start 3      # broker N on gRPC 909N, admin 808N
+./scripts/demo.py create orders 6
+./scripts/demo.py layout          # every topic, every broker
+./scripts/demo.py map    orders   # who holds what
+./scripts/demo.py wrong  orders 1 # ask the wrong broker on purpose
+./scripts/cluster.sh kill 1       # watch its partitions go dark
+./scripts/cluster.sh clean
+```
+
+`scripts/demo.py` is a miniature client library: it fetches metadata, computes
+the partition **itself** (with the same `Partitioner` the broker uses), and
+connects to the owner. That is not optional once there is more than one
+broker — you cannot know which broker to open a socket to until you know the
+partition.
+
+### What happens when a broker dies, or the cluster resizes
+
+| event | what happens | safe? |
+|---|---|---|
+| **pod restarts** (`kubectl delete pod`) | same ordinal, same PVC, same ring → ownership unchanged. Its partitions are unavailable while it recovers, then return intact. | ✅ |
+| **rolling update** | the above, one pod at a time | ✅ |
+| **broker down** | *only its* partitions are unreachable. Nothing is lost; nothing is served in its place, because there is no replication. | ⚠️ partial outage |
+| **scale up / down** | ownership moves, but **data does not**. Segments stay on the old broker while the new owner starts an empty log at offset 0. | 🔴 **needs migration** |
+
+**`PYKA_BROKERS` is effectively immutable while the cluster holds data.**
+Changing it without moving files is the worst failure this system has: not an
+error, but two logs for one partition, neither aware of the other.
+
+So a broker that finds partition directories it no longer owns **refuses
+readiness**: the process stays up (exec in and look), Kubernetes routes it no
+traffic, and `kubectl get pods` shows `0/1`. Loud stop over silent divergence.
+
+```
+ERROR pyka.broker.store: REFUSING TO SERVE: orders: partitions [1]. The broker
+count changed under existing data, so these partitions are orphaned — their
+segments are here but their owner is elsewhere.
+```
+
+#### Resizing a cluster (offline)
+
+1. stop every broker
+2. for each orphaned partition, move `.../<topic>/<partition>/` to the
+   directory of its new owner — ask any broker's `Metadata`, or compute
+   `HashRing(brokers=NEW, me=0).broker_for(topic, partition)`
+3. start with the new `PYKA_BROKERS`
+
+`PYKA_ALLOW_ORPHANS=1` starts anyway and accepts the split — an escape hatch,
+not a fix.
+
+**What would make this online is replication**: copy the partition to its new
+owner *before* flipping ownership. That is Kafka's partition reassignment, and
+it is the large project this design deliberately defers.
+
 ### Environment
 
 | variable | default | |
@@ -545,14 +604,17 @@ grpcurl -plaintext localhost:9092 list
 | `PYKA_SEGMENT_BYTES` | 1 GiB | max 4 GiB — the index's u32 position |
 | `PYKA_SYNC_RECORDS` / `PYKA_SYNC_MILLIS` | unset | unset = never fsync explicitly |
 | `PYKA_PORT` / `PYKA_ADMIN_PORT` | 9092 / 8080 | |
-| `PYKA_BROKERS` | 1 | cluster size; ordinal comes from `$HOSTNAME` |
+| `PYKA_BROKERS` | 1 | cluster size; ordinal from `$HOSTNAME`. **Immutable while data exists** |
+| `PYKA_ADDRESS_TEMPLATE` | `pyka-{ordinal}.pyka-hl:9092` | what Metadata hands clients |
+| `PYKA_RING` | consistent | `modulo` for the naive `p % n` |
+| `PYKA_ALLOW_ORPHANS` | unset | `1` to serve despite misplaced partitions |
 | `PYKA_GRACE` | 30 | shutdown drain seconds |
 
 ## Dev
 
 ```sh
 uv sync                    # create the venv
-uv run pytest              # 418 tests
+uv run pytest              # 451 tests
 ./scripts/gen_proto.sh     # regenerate stubs after editing the .proto
 uv run python bench/bench_seek.py
 ```

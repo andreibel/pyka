@@ -17,7 +17,7 @@ import logging
 from pathlib import Path
 
 from pyka.broker.tail import Tail
-from pyka.cluster.ring import Ring
+from pyka.cluster.ring import  Ring
 from pyka.storage.record import Record
 from pyka.storage.types import Offset
 from pyka.topic.policy import SYNC_NEVER, SyncPolicy
@@ -34,6 +34,7 @@ class Store:
         sync_policy: SyncPolicy = SYNC_NEVER,
         max_segment_bytes: int = 1 << 30,
         ring: Ring | None = None,
+        allow_orphans: bool = False,
     ) -> None:
         self._ring = ring or Ring(brokers=1, me=0)
         # The ring reaches layer 2 as a bare predicate, never as a Ring: the
@@ -48,6 +49,8 @@ class Store:
         )
         self._tail = Tail()
         self._ready = False
+        self._allow_orphans = allow_orphans
+        self._orphans: dict[str, list[int]] = {}
 
     @property
     def topic(self) -> Topic:
@@ -63,8 +66,18 @@ class Store:
 
     @property
     def ready(self) -> bool:
-        """False until every log on disk has been recovered."""
+        """False until every log on disk has been recovered — and False for
+        good if this broker holds data it does not own."""
         return self._ready
+
+    @property
+    def orphans(self) -> dict[str, list[int]]:
+        """topic -> partitions whose segments are here but whose owner is not.
+
+        Always empty in a healthy cluster. Non-empty means someone changed the
+        broker count without migrating the data.
+        """
+        return dict(self._orphans)
 
     async def open(self) -> None:
         """Recover every topic found on disk, then report ready.
@@ -80,8 +93,36 @@ class Store:
         for name in names:
             log.info("recovering topic %s", name)
             await asyncio.to_thread(self._topic.create, name)
+
+        self._orphans = await asyncio.to_thread(self._find_orphans, names)
+        if self._orphans and not self._allow_orphans:
+            # Stay alive but never become ready: the pod keeps running so an
+            # operator can exec in and look, while Kubernetes routes no traffic
+            # to it and `kubectl get pods` shows 0/1. Serving anyway would mean
+            # this broker's peers write a fresh empty log for partitions whose
+            # data is sitting right here, unreachable.
+            log.error(
+                "REFUSING TO SERVE: %s. The broker count changed under existing "
+                "data, so these partitions are orphaned — their segments are "
+                "here but their owner is elsewhere. Move the directories to "
+                "their new owners (see README 'Resizing a cluster'), or set "
+                "PYKA_ALLOW_ORPHANS=1 to serve anyway and accept the split.",
+                "; ".join(f"{n}: partitions {ps}" for n, ps in self._orphans.items()),
+            )
+            return
+
+        if self._orphans:
+            log.warning("serving with orphaned partitions: %s", self._orphans)
         self._ready = True
         log.info("store ready: %d topic(s)", len(names))
+
+    def _find_orphans(self, names: list[str]) -> dict[str, list[int]]:
+        found = {}
+        for name in names:
+            foreign = self._topic.foreign_partitions(name)
+            if foreign:
+                found[name] = foreign
+        return found
 
     async def close(self) -> None:
         self._ready = False

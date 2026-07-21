@@ -353,3 +353,10 @@ def test_close_reaches_every_partition_even_if_one_fails(tmp_path):
     assert "disk gone" in str(err.value.exceptions[0])
     assert all(log._active._file.closed for log in healthy)
     assert t._open == {}  # cache cleared regardless
+
+
+def test_foreign_partitions_of_a_topic_with_no_directory_is_empty(tmp_path):
+    # A topic that exists in metadata but has no partition directory here:
+    # what an instance owning none of a topic's partitions looks like.
+    t = topic(tmp_path)
+    assert t.foreign_partitions("never-created") == []

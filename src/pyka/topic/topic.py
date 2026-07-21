@@ -123,10 +123,13 @@ class Topic:
     listing topic names is an ``iterdir`` instead of parsing and
     de-duplicating suffixes.
 
-    ``owns`` decides which partitions live here, and defaults to all of them —
-    the single-node case, and the only one anything below layer 3 has ever
-    needed. Layer 3 passes ``ring.owns``, as a plain predicate, so this module
-    still knows nothing about brokers or clusters.
+    ``owns(topic, partition)`` decides which partitions live here, and defaults
+    to all of them — the single-node case, and the only one anything below
+    layer 3 has ever needed. Layer 3 passes ``ring.owns``, as a plain
+    predicate, so this module still knows nothing about brokers or clusters.
+
+    The topic NAME is part of the question, not just the index: a router that
+    ignored it would send partition 0 of every topic to the same place.
     """
 
     def __init__(
@@ -135,7 +138,7 @@ class Topic:
         partitions: int = 1,
         sync_policy: SyncPolicy = SYNC_NEVER,
         max_segment_bytes: int = 1 << 30,
-        owns: Callable[[int], bool] | None = None,
+        owns: Callable[[str, int], bool] | None = None,
     ) -> None:
         if partitions < 1:
             raise ValueError(f"partitions must be >= 1, got {partitions}")
@@ -143,7 +146,7 @@ class Topic:
         self._default_partitions = partitions
         self._sync_policy = sync_policy
         self._max_segment_bytes = max_segment_bytes
-        self._owns = owns if owns is not None else (lambda _partition: True)
+        self._owns = owns if owns is not None else (lambda _topic, _p: True)
         self._partitioner = Partitioner()
         self._open: dict[str, _OpenTopic] = {}
         # Layer 3 reaches this object from two servers (gRPC and the admin
@@ -195,6 +198,27 @@ class Topic:
         """The subset stored here — all of them unless ``owns`` says otherwise."""
         return sorted(self._topic(name).local)
 
+    def foreign_partitions(self, name: str) -> list[int]:
+        """Partition directories on disk that ``owns`` says are NOT ours.
+
+        This should always be empty. If it is not, the routing changed under a
+        directory that already had data — someone resized the cluster — and
+        those segments are now orphaned: unreachable here, while whoever owns
+        them now starts an empty log and renumbers from zero. Two logs for one
+        partition, neither aware of the other.
+
+        Detecting it is the difference between a loud operational stop and
+        silent divergence, which is the worst failure mode this system has.
+        """
+        directory = self._root / name
+        if not directory.is_dir():
+            return []
+        return sorted(
+            int(p.name)
+            for p in directory.iterdir()
+            if p.name.isdigit() and not self._owns(name, int(p.name))
+        )
+
     # ------------------------------------------------------- create and get
 
     def create(self, name: str, partitions: int | None = None) -> int:
@@ -221,7 +245,7 @@ class Topic:
             local={
                 p: _Partition(Log(self._root / name / str(p), self._max_segment_bytes))
                 for p in range(count)
-                if self._owns(p)
+                if self._owns(name, p)
             },
         )
         self._open[name] = opened

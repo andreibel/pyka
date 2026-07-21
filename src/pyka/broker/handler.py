@@ -154,7 +154,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             # The client did not route, so we did — and the answer is not ours.
             partition = await self._store.route(topic, _key(request))
         ring = self._store.ring
-        owner = ring.broker_for(partition)
+        owner = ring.broker_for(topic, partition)
         await context.abort(
             grpc.StatusCode.FAILED_PRECONDITION,
             f"partition {partition} of {topic!r} belongs to broker {owner} "
@@ -199,8 +199,8 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                     partitions=[
                         broker_pb2.PartitionMetadata(
                             partition=p,
-                            broker=ring.broker_for(p),
-                            address=ring.address_of(ring.broker_for(p)),
+                            broker=ring.broker_for(name, p),
+                            address=ring.address_of(ring.broker_for(name, p)),
                         )
                         for p in range(partitions)
                     ],
@@ -284,7 +284,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             # The consumer is asking the wrong broker. Same redirect as
             # produce: valid request, wrong machine.
             ring = self._store.ring
-            owner = ring.broker_for(request.partition)
+            owner = ring.broker_for(request.topic, request.partition)
             await context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
                 f"partition {request.partition} of {request.topic!r} belongs to "

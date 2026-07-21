@@ -357,3 +357,99 @@ async def test_a_broker_going_away_makes_only_its_partitions_unreachable(cluster
         broker_pb2.ConsumeRequest(topic="orders", partition=0, offset=0)
     )
     assert [r.value async for r in stream] == [b"survives"]
+
+
+# --------------------------------------------------------------------------
+# resizing — what actually breaks, and the guard that makes it visible
+# --------------------------------------------------------------------------
+
+
+async def test_a_restart_with_the_same_ring_keeps_everything(tmp_path):
+    """The reassuring case, and the one that happens constantly in Kubernetes.
+
+    `kubectl delete pod` gives pyka-1 back AS pyka-1, with the same PVC and the
+    same PYKA_BROKERS. Nothing about ownership moved, so nothing is orphaned:
+    the log recovers and offsets continue. A pod cycle is safe.
+    """
+    ring = Ring(brokers=2, me=0, address_template="localhost:909{ordinal}")
+    store = Store(tmp_path / "b0", partitions=4, ring=ring)
+    await store.open()
+    await store.create("orders")
+    await store.append("orders", None, b"before", partition=0)
+    await store.close()
+
+    reborn = Store(tmp_path / "b0", partitions=4, ring=ring)  # identical ring
+    await reborn.open()
+    assert reborn.ready
+    assert reborn.orphans == {}
+    assert [r.value for r in await reborn.read("orders", 0, 0)] == [b"before"]
+    await reborn.close()
+
+
+async def test_resizing_the_cluster_orphans_data_and_refuses_to_serve(tmp_path):
+    """The dangerous case, caught instead of hidden.
+
+    Broker 0 of two owns partitions 0 and 2. Grow the cluster to four and it
+    owns only 0 — but partition 2's segments are still on its disk, while
+    broker 2 will happily start an empty log and renumber from zero. Two logs
+    for one partition, neither aware of the other, no error anywhere.
+
+    So the broker refuses readiness. The pod stays up (exec in and look), gets
+    no traffic, and shows 0/1 in kubectl. A loud stop beats silent divergence.
+    """
+    two = Ring(brokers=2, me=0, address_template="localhost:909{ordinal}")
+    store = Store(tmp_path / "b0", partitions=4, ring=two)
+    await store.open()
+    await store.create("orders")
+    await store.append("orders", None, b"data", partition=2)
+    await store.close()
+
+    four = Ring(brokers=4, me=0, address_template="localhost:909{ordinal}")
+    resized = Store(tmp_path / "b0", partitions=4, ring=four)
+    await resized.open()
+
+    assert resized.orphans == {"orders": [2]}
+    assert not resized.ready, "must not serve while holding data it does not own"
+    await resized.close()
+
+
+async def test_orphans_can_be_served_deliberately(tmp_path):
+    # An escape hatch, because refusing to start is a big hammer and an
+    # operator who understands the trade may need the broker up regardless.
+    two = Ring(brokers=2, me=0, address_template="localhost:909{ordinal}")
+    store = Store(tmp_path / "b0", partitions=4, ring=two)
+    await store.open()
+    await store.create("orders")
+    await store.append("orders", None, b"data", partition=2)
+    await store.close()
+
+    four = Ring(brokers=4, me=0, address_template="localhost:909{ordinal}")
+    resized = Store(tmp_path / "b0", partitions=4, ring=four, allow_orphans=True)
+    await resized.open()
+
+    assert resized.orphans == {"orders": [2]}
+    assert resized.ready
+    await resized.close()
+
+
+async def test_consistent_hashing_orphans_far_less_on_a_resize(tmp_path):
+    """Why HashRing is the default: the same resize, a fraction of the damage."""
+    from pyka.cluster.ring import HashRing
+
+    orphan_counts = {}
+    for name, ring_class in (("modulo", Ring), ("consistent", HashRing)):
+        root = tmp_path / name
+        before = ring_class(brokers=3, me=0)
+        store = Store(root, partitions=30, ring=before)
+        await store.open()
+        await store.create("orders")
+        for p in await store.local_partitions("orders"):
+            await store.append("orders", None, b"x", partition=p)
+        await store.close()
+
+        after = Store(root, partitions=30, ring=ring_class(brokers=4, me=0))
+        await after.open()
+        orphan_counts[name] = len(after.orphans.get("orders", []))
+        await after.close()
+
+    assert orphan_counts["consistent"] < orphan_counts["modulo"], orphan_counts
