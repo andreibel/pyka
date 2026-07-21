@@ -563,7 +563,8 @@ partition.
 |---|---|---|
 | **pod restarts** (`kubectl delete pod`) | same ordinal, same PVC, same ring → ownership unchanged. Its partitions are unavailable while it recovers, then return intact. | ✅ |
 | **rolling update** | the above, one pod at a time | ✅ |
-| **broker down** | *only its* partitions are unreachable. Nothing is lost; nothing is served in its place, because there is no replication. | ⚠️ partial outage |
+| **broker down** | *only its* partitions are unreachable. Nothing is lost, and nothing is served in its place — see below. | ⚠️ partial outage |
+| **broker's disk destroyed** | those partitions are **gone permanently**. No replication means no second copy. | 🔴 **data loss** |
 | **scale up / down** | ownership moves, but **data does not**. Segments stay on the old broker while the new owner starts an empty log at offset 0. | 🔴 **needs migration** |
 
 **`PYKA_BROKERS` is effectively immutable while the cluster holds data.**
@@ -579,6 +580,38 @@ ERROR pyka.broker.store: REFUSING TO SERVE: orders: partitions [1]. The broker
 count changed under existing data, so these partitions are orphaned — their
 segments are here but their owner is elsewhere.
 ```
+
+#### While a partition's owner is down
+
+Produce and consume for **its** partitions fail with `UNAVAILABLE`; everything
+else keeps working. The data is not lost, only unreachable, and it comes back
+intact when the broker does.
+
+**No other broker may take those writes.** It would create a second log for the
+same partition, starting at offset 0, while the real one is somewhere else at
+offset 7 — two logs, both claiming the same offsets, holding different records,
+with no correct way to merge them. That is why the ownership check answers
+`FAILED_PRECONDITION` even during an outage: refusing the write *is* the
+feature.
+
+So the buffering belongs in the **producer**, never on another broker. That is
+what a Kafka producer does (`retries`, `delivery.timeout.ms`, an in-memory
+accumulator) and what `./scripts/demo.py resilient` demonstrates:
+
+```
+$ ./scripts/cluster.sh kill 2
+$ ./scripts/demo.py resilient orders 40 40
+  delivered 17/40; 23 buffered, waiting on broker(s) [2] — retrying in 0.2s
+  delivered 17/40; 23 buffered, waiting on broker(s) [2] — retrying in 4.0s
+restarting broker 2
+  delivered all 40 records in 7.9s
+```
+
+Consumers need nothing special: they reconnect and resume from their last
+offset, because offsets are durable on disk.
+
+**Only replication removes the outage** — a follower already holds the records,
+so a leader election continues service in seconds. Nothing else gets you there.
 
 #### Resizing a cluster (offline)
 

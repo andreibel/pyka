@@ -83,6 +83,16 @@ async def serve() -> None:
     admin.install_signal_handlers = lambda: None  # type: ignore[method-assign]
     admin_task = asyncio.create_task(admin.serve())
 
+    # Wait for uvicorn to actually bind before going any further. Without this,
+    # a port conflict on the admin side left the broker running with gRPC up,
+    # "ready" in the log, and no control plane at all — a half-started process
+    # that had already announced itself. Fail fast and loudly instead.
+    while not admin.started and not admin_task.done():
+        await asyncio.sleep(0.01)
+    if admin_task.done():
+        admin_task.result()  # re-raises whatever uvicorn failed with
+        raise RuntimeError("admin server exited during startup")
+
     # Both ports are listening now, but health stays NOT_SERVING and /readyz
     # returns 503 until recovery finishes — a scan of every segment on the
     # volume, ~15 s/GiB. This is the gap a naive probe turns into a crash loop.

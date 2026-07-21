@@ -12,6 +12,7 @@
     ./scripts/demo.py tail    orders 1       # live; blocks
     ./scripts/demo.py show    orders 0       # segments on disk
     ./scripts/demo.py wrong   orders 1       # ask the WRONG broker on purpose
+    ./scripts/demo.py resilient orders 60    # keeps producing while you kill a broker
 
 This is a miniature client library. Note what it does that a single-broker
 client never had to: fetch metadata, compute the partition itself, and open a
@@ -20,6 +21,7 @@ because you cannot know which broker to talk to until you know the partition.
 """
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -203,6 +205,68 @@ def wrong(topic: str, partition: str = "0") -> None:
         print(f"  {err.code().name}: {err.details()}")
 
 
+def resilient(topic: str, count: str = "60", deadline: str = "30") -> None:
+    """Produce with retry and buffering, the way a real producer does.
+
+    Run this, then `./scripts/cluster.sh kill 2` in another terminal, then
+    start broker 2 again. Records for the dead broker's partitions pile up in
+    the buffer HERE and are delivered when it returns; everything else keeps
+    flowing the whole time.
+
+    The buffer is in the client and nowhere else. A broker holding another
+    broker's writes would be split-brain — two logs for one partition, both
+    numbering from zero, no correct way to merge them. That is why the broker
+    answers FAILED_PRECONDITION instead of being helpful.
+    """
+    total, limit = int(count), float(deadline)
+    partitioner = Partitioner()
+    routing = _routing(topic)
+
+    pending = [
+        (partitioner.partition_for(f"user-{n}".encode(), len(routing)),
+         f"user-{n}".encode(), f"record-{n:04d}".encode())
+        for n in range(total)
+    ]
+    delivered, backoff, started = 0, 0.25, time.monotonic()
+
+    while pending and time.monotonic() - started < limit:
+        still_waiting, failures = [], 0
+        for partition, key, value in pending:
+            broker = routing.get(partition)
+            try:
+                _grpc(broker).Produce(
+                    pb.ProduceRequest(topic=topic, key=key, value=value,
+                                      partition=partition),
+                    timeout=2,
+                )
+                delivered += 1
+            except grpc.RpcError as err:
+                if err.code() == grpc.StatusCode.FAILED_PRECONDITION:
+                    # Our routing is stale — the cluster moved. Refetch and
+                    # retry rather than guessing.
+                    routing = _routing(topic)
+                still_waiting.append((partition, key, value))
+                failures += 1
+
+        pending = still_waiting
+        if pending:
+            waiting_on = sorted({routing.get(p) for p, _, _ in pending})
+            print(f"  delivered {delivered}/{total}; {len(pending)} buffered, "
+                  f"waiting on broker(s) {waiting_on} — retrying in {backoff:.1f}s",
+                  flush=True)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 4.0)  # exponential, capped
+
+    if pending:
+        # A real producer raises here rather than pretending: after the
+        # deadline the records are the application's problem again.
+        print(f"  GAVE UP after {limit:.0f}s with {len(pending)} undelivered "
+              f"— the owner never came back")
+    else:
+        print(f"  delivered all {total} records in "
+              f"{time.monotonic() - started:.1f}s")
+
+
 def show(topic: str, partition: str = "0") -> None:
     """The segment chain of one partition, on whichever broker holds it."""
     partition = int(partition)
@@ -225,7 +289,7 @@ def _print_record(record) -> None:
 
 COMMANDS = {"create": create, "map": map, "layout": layout, "produce": produce,
             "bulk": bulk, "consume": consume, "tail": tail, "wrong": wrong,
-            "show": show}
+            "resilient": resilient, "show": show}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
