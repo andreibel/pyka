@@ -83,12 +83,41 @@ class Log:
         # base equals the next offset by construction (the chain invariant is
         # maintained by the same line that rolls).
         if not self._active.has_room_for(record):
-            self._active.close()  # seal: write handles drop, reads keep working
-            self._segments.append(
-                Segment(self._directory, offset, self._max_segment_bytes)
-            )
+            self.roll()
         self._active.append(record)
         return offset
+
+    def roll(self) -> Segment:
+        """Seal the active segment and start a new one; returns the new tail.
+
+        Called by append when the tail is full, and by an operator who wants
+        to force it — sealing is what makes a segment eligible for retention,
+        so "roll now" is a real operational request and not just a test hook.
+
+        The new base offset is the current next offset, which is what keeps
+        the chain continuous: the invariant is maintained by the same line
+        that breaks the old segment off.
+
+        Rolling an EMPTY segment does nothing, and must not. Its base already
+        equals the next offset, so the "new" segment would take the same name
+        and therefore the same file — leaving two Segment objects writing one
+        path, and a chain listing segments that do not exist. An empty segment
+        is already a fresh one; there is nothing to seal.
+        """
+        if self._active.size_bytes == 0:
+            return self._active
+
+        self._active.close()  # seal: write handles drop, reads keep working
+        self._segments.append(
+            Segment(self._directory, self.next_offset, self._max_segment_bytes)
+        )
+        return self._active
+
+    @property
+    def segments(self) -> tuple[Segment, ...]:
+        """The chain, oldest first. A tuple so a caller cannot splice it —
+        only append and roll may change which segments exist."""
+        return tuple(self._segments)
 
     def read_from(self, offset: Offset) -> Iterator[Record]:
         """Records from ``offset`` onward, crossing segment boundaries.

@@ -33,6 +33,24 @@ class Segment:
         """
         return self._next_offset
 
+    @property
+    def size_bytes(self) -> int:
+        """Bytes written, tracked in memory rather than stat()'d."""
+        return self._position
+
+    @property
+    def sealed(self) -> bool:
+        """True once closed — which is exactly "no longer writable", because
+        sealing IS closing here. Reads keep working either way."""
+        return self._file.closed
+
+    @property
+    def index_entries(self) -> int:
+        """How many sparse index entries cover this segment. Observability
+        only: roughly size_bytes / interval_bytes, and a useful sanity check
+        that the index is actually being fed."""
+        return len(self._index)
+
     def _recover(self) -> tuple[Offset, Position]:
         """Scan the log, returning (next_offset, end of the last good record).
 

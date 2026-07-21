@@ -1,5 +1,6 @@
 """Topic: named logs on disk — validation, routing, and when to fsync."""
 import string
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -106,6 +107,17 @@ class Topic:
         self._max_segment_bytes = max_segment_bytes
         self._partitioner = Partitioner()
         self._open: dict[str, list[_Partition]] = {}
+        # Layer 3 reaches this object from two servers (gRPC and the admin
+        # API), each dispatching blocking calls through asyncio.to_thread — so
+        # several threads really can call create() for the same name at once.
+        # Without this, both would win the "not in cache" check and build two
+        # Log objects on one directory, each holding its own write handle.
+        # Reentrant because append() and _partitions() both call create().
+        #
+        # Scope is deliberately the CACHE, not the whole class: appends to
+        # different topics must not serialise. The per-log lock that makes
+        # concurrent appends safe belongs in Log.append and lands with B2.
+        self._lock = threading.RLock()
         root.mkdir(parents=True, exist_ok=True)
 
     # ---------------------------------------------------------------- names
@@ -149,9 +161,12 @@ class Topic:
         the ordering guarantee the partitioner exists to provide.
         """
         validate_name(name)
-        if name in self._open:
-            return len(self._open[name])
+        with self._lock:
+            if name in self._open:
+                return len(self._open[name])
+            return self._open_locked(name, partitions)
 
+    def _open_locked(self, name: str, partitions: int | None) -> int:
         existing = self._partition_dirs(name)
         count = len(existing) or (partitions or self._default_partitions)
         self._open[name] = [
@@ -188,9 +203,13 @@ class Topic:
         way topics come into existence (Kafka's auto.create.topics.enable).
         """
         validate_name(name)
-        if name not in self._open:
-            self.create(name)
-        parts = self._open[name]
+        with self._lock:
+            # Only the cache lookup is guarded. The append itself is outside
+            # the lock so two topics never block each other; making concurrent
+            # appends to ONE log safe is Log.append's job (B2).
+            if name not in self._open:
+                self._open_locked(name, None)
+            parts = self._open[name]
 
         partition = self._partitioner.partition_for(key, len(parts))
         entry = parts[partition]
@@ -246,9 +265,10 @@ class Topic:
     def _partitions(self, name: str) -> list[_Partition]:
         """Open partitions for an EXISTING topic, or raise."""
         validate_name(name)
-        if name in self._open:
+        with self._lock:
+            if name in self._open:
+                return self._open[name]
+            if not self._partition_dirs(name):
+                raise UnknownTopic(name)
+            self._open_locked(name, None)  # adopts the count from disk
             return self._open[name]
-        if not self._partition_dirs(name):
-            raise UnknownTopic(name)
-        self.create(name)  # adopts the count from disk
-        return self._open[name]

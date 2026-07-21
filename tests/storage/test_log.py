@@ -132,6 +132,40 @@ def test_rolling_seals_the_previous_segment(tmp_path):
     assert not active._file.closed
 
 
+def test_rolling_an_empty_segment_does_nothing(tmp_path):
+    """Found by running the broker, not by a test.
+
+    A new segment is named for the next offset. Roll an empty one and that
+    offset has not moved, so the "new" segment takes the SAME filename — two
+    Segment objects writing one file, and a chain listing segments that have
+    no file of their own. An empty segment is already fresh.
+    """
+    log = open_log(tmp_path)
+    assert log.roll() is log._active
+    assert len(log.segments) == 1
+    assert log_files(tmp_path) == ["00000000000000000000.log"]
+
+    fill(log, 1)
+    log.roll()
+    log.roll()  # second one is a no-op: the new segment is empty
+    assert len(log.segments) == 2
+    assert len({s.base_offset for s in log.segments}) == 2  # no duplicate bases
+
+
+def test_rolling_seals_and_keeps_the_chain_continuous(tmp_path):
+    log = open_log(tmp_path)
+    fill(log, 2)
+    sealed_at = log.next_offset
+
+    new_tail = log.roll()
+    assert new_tail.base_offset == sealed_at
+    assert log.segments[-2].sealed and not new_tail.sealed
+    assert [r.offset for r in log.read_from(Offset(0))] == [0, 1]
+
+    fill(log, 1)  # keeps counting into the new segment
+    assert [r.offset for r in log.read_from(Offset(0))] == [0, 1, 2]
+
+
 def test_a_record_bigger_than_max_bytes_still_lands(tmp_path):
     # max_bytes is a SOFT limit: an empty segment accepts anything, otherwise
     # an oversized record would roll forever, filling the disk with empty files.
