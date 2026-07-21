@@ -3,6 +3,7 @@
 
     ./scripts/demo.py produce orders user-1 "hello world"
     ./scripts/demo.py bulk    orders 500
+    ./scripts/demo.py consume orders 0 0 20      # topic partition offset limit
     ./scripts/demo.py topics
     ./scripts/demo.py show    orders 0
 
@@ -65,6 +66,27 @@ def bulk(topic: str, count: str) -> None:
         print(f"  partition {partition}: {counts[partition]}")
 
 
+def consume(topic: str, partition: str = "0", offset: str = "0",
+            limit: str = "10") -> None:
+    """Server-streaming read: records arrive one at a time, not as a blob."""
+    with grpc.insecure_channel(GRPC) as channel:
+        stream = broker_pb2_grpc.BrokerStub(channel).Consume(
+            broker_pb2.ConsumeRequest(
+                topic=topic,
+                partition=int(partition),
+                offset=int(offset),
+                max_records=int(limit),
+            )
+        )
+        for record in stream:
+            key = record.key.decode() if record.HasField("key") else "<none>"
+            if not record.HasField("value"):
+                value = "<TOMBSTONE>"
+            else:
+                value = record.value.decode(errors="replace")[:40]
+            print(f"  offset {record.offset:>6}  key {key:<12} {value}")
+
+
 def topics() -> None:
     print(json.dumps(_rest("/topics"), indent=2))
 
@@ -85,8 +107,8 @@ def show(topic: str, partition: str = "0") -> None:
               f"  {segment['index_entries']:>5} index entries  {state}")
 
 
-COMMANDS = {"produce": produce, "bulk": bulk, "topics": topics,
-            "create": create, "show": show}
+COMMANDS = {"produce": produce, "bulk": bulk, "consume": consume,
+            "topics": topics, "create": create, "show": show}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:

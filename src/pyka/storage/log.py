@@ -19,6 +19,18 @@ class CorruptLog(ValueError):
     """
 
 
+class OffsetOutOfRange(ValueError):
+    """Asked for an offset before this log begins.
+
+    Distinct from a malformed request: the offset is well-formed, it simply
+    names records that are not here — never written, or deleted by retention
+    once that exists. A consumer resuming from a stale committed offset hits
+    this, and its correct response is to reset to the earliest offset rather
+    than to fix its arguments. Subclasses ValueError so callers that only
+    care that it is bad input still work.
+    """
+
+
 class Log:
     def __init__(self, directory: Path, max_segment_bytes: int = 1 << 30) -> None:
         self._directory = directory
@@ -145,7 +157,7 @@ class Log:
         will mean "already deleted").
         """
         if offset < self._segments[0].base_offset:
-            raise ValueError(
+            raise OffsetOutOfRange(
                 f"offset {offset} is before this log starts "
                 f"({self._segments[0].base_offset})"
             )

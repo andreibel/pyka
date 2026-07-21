@@ -127,14 +127,18 @@ async def test_metadata_is_unimplemented(channel):
     assert "D4" in err.value.details()
 
 
-async def test_consume_is_unimplemented(channel):
+async def test_follow_is_unimplemented(channel):
     # Server-streaming: the error surfaces on the first read, not the call.
+    # Aborting is better than silently ending a stream the client expects to
+    # stay open — a live tail that quietly stops looks like an empty topic.
     stub = broker_pb2_grpc.BrokerStub(channel)
-    call = stub.Consume(broker_pb2.ConsumeRequest(topic="orders", partition=0))
+    call = stub.Consume(
+        broker_pb2.ConsumeRequest(topic="orders", partition=0, follow=True)
+    )
     with pytest.raises(grpc.aio.AioRpcError) as err:
         await call.read()
     assert err.value.code() == grpc.StatusCode.UNIMPLEMENTED
-    assert "B3" in err.value.details()
+    assert "B4" in err.value.details()
 
 
 # --------------------------------------------------------------------------

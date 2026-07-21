@@ -436,7 +436,7 @@ invariant `PREFIX_SIZE + size == Record.size()` must always hold.
 - [x] B1: `.proto` defined, stubs generated, `grpc.aio` server with health
 - [x] B1b: FastAPI control plane on :8080, same process, shared `Topic`
 - [x] B2: `Produce` + `ProduceStream` append to a topic's log
-- [ ] B3: `Consume` server-streams records from an offset
+- [x] B3: `Consume` server-streams records from an offset
 - [ ] B4: live tail — `follow=true` keeps the stream open (`asyncio.Event` per partition)
 
 ### Phase D — Kubernetes (the deployment is the lesson)
@@ -509,6 +509,7 @@ segments, probes). Interactive docs at <http://localhost:8080/docs>.
 ./scripts/demo.py create  orders 3          # REST
 ./scripts/demo.py produce orders user-1 hi  # gRPC
 ./scripts/demo.py bulk    orders 500        # gRPC streaming
+./scripts/demo.py consume orders 0 0 20     # topic partition offset limit
 ./scripts/demo.py topics
 ./scripts/demo.py show    orders 2          # the segment chain
 ```

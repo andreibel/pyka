@@ -15,9 +15,22 @@ from collections.abc import AsyncIterator
 import grpc
 
 from pyka.broker.store import Store
+from pyka.storage.log import OffsetOutOfRange
+from pyka.storage.record import Record
+from pyka.storage.types import Offset
+from pyka.topic.topic import UnknownTopic
 from pyka.v1 import broker_pb2, broker_pb2_grpc
 
 _NOT_YET = "not implemented until {milestone}"
+
+BATCH = 500
+"""Records fetched per trip to the worker thread.
+
+Streaming must not slurp: a consumer reading a 1 GiB partition from offset 0
+cannot hold it in memory. Bigger batches mean fewer thread hops and more
+memory held at once; 500 records of a few hundred bytes is well under a
+megabyte, and the fixed cost of asyncio.to_thread is amortised over all of it.
+"""
 
 
 def _key(request: broker_pb2.ProduceRequest) -> bytes | None:
@@ -34,6 +47,21 @@ def _value(request: broker_pb2.ProduceRequest) -> bytes | None:
 
 def _timestamp(request: broker_pb2.ProduceRequest) -> int | None:
     return request.timestamp if request.HasField("timestamp") else None
+
+
+def _to_proto(record: Record) -> broker_pb2.Record:
+    """Wire form of a stored record.
+
+    Absent fields are left unset rather than sent as b"": protobuf field
+    presence is what carries "no key" and "tombstone" across the network, and
+    assigning b"" would flatten both into an empty payload.
+    """
+    message = broker_pb2.Record(offset=record.offset, timestamp=record.timestamp)
+    if record.key is not None:
+        message.key = record.key
+    if record.value is not None:
+        message.value = record.value
+    return message
 
 
 class BrokerServicer(broker_pb2_grpc.BrokerServicer):
@@ -99,7 +127,60 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
     async def Consume(
         self, request: broker_pb2.ConsumeRequest, context: grpc.aio.ServicerContext
     ) -> AsyncIterator[broker_pb2.Record]:
-        await context.abort(
-            grpc.StatusCode.UNIMPLEMENTED, _NOT_YET.format(milestone="B3")
-        )
-        yield broker_pb2.Record()  # pragma: no cover
+        """Stream records from an offset until the log runs out.
+
+        No partitioner here: a consumer names the partition it was assigned,
+        so reads never route by key. Records carry their own offsets, which is
+        how a client knows where to resume.
+
+        Records are fetched a batch at a time rather than all at once — see
+        BATCH. Between batches the event loop is free, so one consumer reading
+        a huge partition does not stall every other connection.
+        """
+        if request.follow:
+            await context.abort(
+                grpc.StatusCode.UNIMPLEMENTED, _NOT_YET.format(milestone="B4")
+            )
+
+        offset = request.offset
+        remaining = request.max_records if request.max_records > 0 else None
+
+        while True:
+            limit = BATCH if remaining is None else min(BATCH, remaining)
+            batch = await self._read(request, offset, limit, context)
+            for record in batch:
+                yield _to_proto(record)
+
+            if len(batch) < limit:
+                break  # short batch means the log ended
+            offset = batch[-1].offset + 1
+            if remaining is not None:
+                remaining -= len(batch)
+                if remaining <= 0:
+                    break
+
+    async def _read(
+        self,
+        request: broker_pb2.ConsumeRequest,
+        offset: int,
+        limit: int,
+        context: grpc.aio.ServicerContext,
+    ) -> list[Record]:
+        try:
+            return await self._store.read(
+                request.topic, Offset(offset), request.partition, limit
+            )
+        except UnknownTopic:
+            await context.abort(
+                grpc.StatusCode.NOT_FOUND, f"no topic {request.topic!r}"
+            )
+        except OffsetOutOfRange as err:
+            # Well-formed but unsatisfiable — the records are not here. A
+            # consumer resuming from a stale committed offset lands here, and
+            # should reset to the earliest offset rather than retry.
+            await context.abort(grpc.StatusCode.OUT_OF_RANGE, str(err))
+        except ValueError as err:
+            # Malformed: an illegal topic name, or a partition this topic
+            # does not have.
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(err))
+        raise AssertionError("unreachable")  # pragma: no cover — abort raises
