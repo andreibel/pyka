@@ -10,15 +10,15 @@ Rules of the project: single node, no replication, our own gRPC/protobuf API
 
 Four layers. Each one only knows about the layer below it.
 
+See **[docs/architecture.md](docs/architecture.md)** for the call paths —
+producing and consuming end to end, with diagrams.
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Layer 4  cluster/    ring.py — consistent hashing,          │
-│                      partition -> node. NOT IMPLEMENTED,    │
-│                      placeholder for the stretch phase.     │
-├─────────────────────────────────────────────────────────────┤
-│ Layer 3  broker/     gRPC on asyncio. server / protocol /   │
-│                      handler / store. The only async code,  │
-│                      and the only place with dependencies.  │
+│ Layer 3  broker/     gRPC :9092 (data) + FastAPI :8080      │
+│                      (control). server / handler / admin /  │
+│                      store. The only async code, and the    │
+│                      only place with dependencies.          │
 ├─────────────────────────────────────────────────────────────┤
 │ Layer 2  topic/      policy: which Log a record goes to,    │
 │                      when to fsync. topic / partitioner /   │
@@ -29,6 +29,10 @@ Four layers. Each one only knows about the layer below it.
 │                      record / segment / index / log.        │
 │                      Imports nothing from the rest of pyka. │
 └─────────────────────────────────────────────────────────────┘
+
+  cluster/ring.py  is NOT a layer above these. It imports nothing and is
+  imported BY the broker: a leaf lookup table, partition -> broker ordinal.
+  A cluster is N copies of this same process, not a tier on top of one.
 ```
 
 ### Sync or async?
@@ -450,11 +454,16 @@ invariant `PREFIX_SIZE + size == Record.size()` must always hold.
 src/pyka/
   storage/   layer 1 — record.py  index.py  segment.py  log.py
   topic/     layer 2 — topic.py  partitioner.py  policy.py
-  broker/    layer 3 — server.py  protocol.py  handler.py  store.py
-  cluster/   layer 4 — ring.py                    (placeholder)
-  cli/       entry points — broker.py
+  broker/    layer 3 — server.py  handler.py  admin.py  store.py
+  cluster/   leaf    — ring.py     imported BY broker, depends on nothing
+  v1/        generated protobuf/gRPC stubs — do not edit, see scripts/
+  cli/       entry points — broker.py  (the server's own bootstrap)
+proto/
+  pyka/v1/broker.proto   the wire contract, hand-written
+docs/
+  architecture.md        call paths and topology, with diagrams
 tests/
-  storage/  topic/  broker/
+  storage/  topic/  cluster/  broker/
 bench/
   bench_seek.py   time-to-first-record vs log size; results/ holds both runs
 ```
