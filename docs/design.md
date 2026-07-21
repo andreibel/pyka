@@ -1,8 +1,30 @@
 # Design
 
-How pyKA is built and, more importantly, why. Every decision here was
-made deliberately and is written down with its reasoning; several were
-revised after measurement.
+How pyKA is built and, more importantly, why. Every decision here was made
+deliberately and is written down with its reasoning; several were revised after
+measurement.
+
+## Performance, measured
+
+The sparse index is the one piece with a number attached. Time to reach a
+record in the middle of a partition, over `bench/bench_seek.py`:
+
+| log size | scanning from byte 0 | with the index |
+|---|---|---|
+| 1 MiB | 5.8 ms | 0.023 ms |
+| 4 MiB | 23.2 ms | 0.038 ms |
+| 16 MiB | 93.3 ms | 0.035 ms |
+| 64 MiB | 377.2 ms | 0.028 ms |
+
+Scanning grows exactly linearly — 4.03x, 4.02x, 4.04x per 4x of file. With the
+index it is flat: a 64x larger log costs nothing more to seek into, because the
+work is a binary search in memory plus a bounded scan of one 4 KiB interval.
+That is `O(file)` becoming `O(interval)`.
+
+Two honest caveats. The benchmark runs warm, so it measures the CPU cost of
+decoding records rather than disk I/O — a cold cache would widen the gap, not
+narrow it. And the headline ratio is a function of the file size you choose;
+the flatness is the real result.
 
 For call paths and cluster topology see [architecture.md](architecture.md).
 

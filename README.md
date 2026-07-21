@@ -1,10 +1,10 @@
 # pyKA
 
-**A Kafka-like log broker, written from scratch in Python.**
+**A lightweight message broker — publish and subscribe over gRPC, backed by a
+durable append-only log.**
 
-An append-only log storage engine — records, segments, a sparse index, crash
-recovery — with a gRPC broker and a client library on top. Partitioned,
-shardable across brokers, and small enough to read end to end.
+Runs as a single container, a Compose cluster, or a Kubernetes StatefulSet.
+No JVM, no ZooKeeper, no external services to stand up first.
 
 [![CI](https://github.com/andreibel/pyKA/actions/workflows/ci.yml/badge.svg)](https://github.com/andreibel/pyKA/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/pyka-log)](https://pypi.org/project/pyka-log/)
@@ -15,23 +15,40 @@ shardable across brokers, and small enough to read end to end.
 
 ---
 
-## What it does
+## Why pyKA
 
-- **Append-only log** with Kafka-style framing: CRC-checked records,
-  tombstones, segments that roll at a size limit
-- **Sparse index** — one entry per 4 KiB, always verified against the log,
-  never trusted. Turns a mid-log read from *O(file)* into *O(interval)*:
-  **377 ms to 0.03 ms** on a 64 MiB log ([benchmark](bench/bench_seek.py))
-- **Crash recovery** — torn tails truncated, indexes rebuilt, broken segment
-  chains refused rather than silently served
-- **Partitions** routed by `crc32(key) % n`, so records sharing a key keep
-  their relative order
-- **Sharding across brokers** with consistent hashing, client-side routing,
-  and redirects when a client asks the wrong broker
-- **Live tail** — consumers block on a stream and receive records as they are
-  written
-- **Two planes** — gRPC on `:9092` for data, a FastAPI control plane on
-  `:8080` for topics, segment inspection, and Kubernetes probes
+**Easy to deploy.** One 284 MB container with two ports and a volume. Scale to
+a cluster by changing one number. Health and readiness endpoints that
+Kubernetes understands, and a shutdown that drains cleanly instead of being
+killed mid-write.
+
+**Easy to use.** `pip install pyka-log` and three classes: `Producer`,
+`Consumer`, `Admin`. The client finds the right broker for you, retries when
+one is down, and hands back anything it could not deliver rather than dropping
+it quietly.
+
+**Easy to learn.** About 1,700 lines of commented Python across four small
+layers. Every design decision is written down with the reasoning behind it, and
+several were changed after being measured. If you have ever wanted to know how
+a log broker actually works, this one is short enough to read in an evening.
+
+---
+
+## Features
+
+- **Durable log** — records are CRC-checked, written to segments that roll at a
+  size limit, and survive a crash: torn writes are truncated on restart and
+  damaged files are refused rather than silently served
+- **Topics and partitions** — records sharing a key always land together and
+  keep their order; partitions give you parallelism
+- **Live tail** — consumers block on a stream and receive records the moment
+  they are written, with no polling
+- **Fast reads anywhere in the log** — a sparse index makes reading from the
+  middle of a large log as cheap as reading from the end
+- **Scales across brokers** — partitions spread over a cluster with consistent
+  hashing; clients route themselves and are redirected if they guess wrong
+- **Two planes** — gRPC on `:9092` for data, an HTTP control plane on `:8080`
+  for topics, inspection, and probes
 
 ---
 
