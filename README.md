@@ -534,7 +534,8 @@ uv run python examples/consumer.py orders 2      # terminal 1 — blocks
 uv run python examples/producer.py orders        # terminal 2 — type and enter
 ```
 
-See [examples/](examples/).
+Full API reference: **[docs/client-api.md](docs/client-api.md)**. Runnable
+examples: [examples/](examples/).
 
 ## Running it
 
