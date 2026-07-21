@@ -495,6 +495,47 @@ bench/
 `src/` layout on purpose: it stops an import resolving against the working
 directory instead of the installed package.
 
+## Using it from Python
+
+```python
+from pyka.client import Producer, Consumer, Admin
+
+Admin("http://localhost:8080").create_topic("orders", partitions=3)
+
+with Producer(["localhost:9090", "localhost:9091"]) as producer:
+    partition, offset = producer.send("orders", b"hello", key=b"user-1")
+
+with Consumer(["localhost:9090"]) as consumer:
+    for record in consumer.consume("orders", partition, follow=True):
+        print(record.offset, record.key, record.value)
+```
+
+The client is **blocking**, deliberately: the broker is async because it serves
+many connections, a client serves one caller and gains nothing from an event
+loop. What it does that a single-broker client never had to:
+
+- **routes** — computes the partition with the same `crc32(key) % n` the broker
+  uses, because it cannot know which broker to connect to until it knows the
+  partition;
+- **discovers** — asks any broker for metadata and caches the routing table;
+- **recovers** — retries a dead broker with backoff, refetches metadata when a
+  broker says the routing moved, and raises `DeliveryFailed` **carrying the
+  undelivered records** rather than dropping them.
+
+Records buffer in the *client* while a broker is down. They cannot buffer
+anywhere else: a broker accepting another broker's writes would create a second
+log for that partition, numbering from zero, with no way to reconcile the two.
+
+### Live, in two terminals
+
+```sh
+./scripts/cluster.sh start 3            # or: docker compose up -d
+uv run python examples/consumer.py orders 2      # terminal 1 — blocks
+uv run python examples/producer.py orders        # terminal 2 — type and enter
+```
+
+See [examples/](examples/).
+
 ## Running it
 
 ```sh

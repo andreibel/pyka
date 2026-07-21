@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  # A new push supersedes an in-flight run on the same ref: no point testing
+  # a commit that is already outdated.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --frozen
+
+      - name: Check the generated stubs are current
+        # The protobuf stubs are committed so `uv sync && pytest` needs no
+        # codegen step. That only stays true if nobody edits the .proto and
+        # forgets to regenerate — this fails the build when they do.
+        run: |
+          ./scripts/gen_proto.sh
+          git diff --exit-code src/pyka/v1/ || {
+            echo "::error::src/pyka/v1 is stale — run ./scripts/gen_proto.sh and commit"
+            exit 1
+          }
+
+      - name: Test
+        run: uv run pytest -q
+
+      - name: Coverage
+        run: |
+          uv run coverage run -m pytest -q
+          uv run coverage report --include='src/pyka/*' --fail-under=95
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: pyka:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the image
+        # Building is not proof it runs. This checks the two things most
+        # likely to break in a container and never in a test: that the venv
+        # is importable at all, and that SIGTERM reaches PID 1 so the broker
+        # drains instead of being killed mid-append.
+        run: |
+          docker run -d --name pyka -p 9092:9092 -p 8080:8080 pyka:ci
+          for i in $(seq 1 30); do
+            curl -sf localhost:8080/readyz && break || sleep 1
+          done
+          curl -sf localhost:8080/readyz | tee /dev/stderr | grep -q '"ready":true'
+
+          start=$(date +%s%N)
+          docker stop pyka
+          elapsed=$(( ($(date +%s%N) - start) / 1000000 ))
+          echo "stopped in ${elapsed}ms"
+          test "$elapsed" -lt 5000 || {
+            echo "::error::shutdown took ${elapsed}ms — SIGTERM is not reaching the broker"
+            exit 1
+          }
