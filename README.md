@@ -21,7 +21,8 @@ Four layers. Each one only knows about the layer below it.
 ├─────────────────────────────────────────────────────────────┤
 │ Layer 2  topic/      policy: which Log a record goes to,    │
 │                      when to fsync. topic / partitioner /   │
-│                      policy.                                │
+│                      policy. Owns topic names — the point   │
+│                      where untrusted input meets the disk.  │
 ├─────────────────────────────────────────────────────────────┤
 │ Layer 1  storage/    mechanism: bytes on disk.              │
 │                      record / segment / index / log.        │
@@ -115,6 +116,46 @@ seek/write/offset-increment before B2 lands.
 │ + read_from(offset) -> Iterator[Record]  crosses segments          │
 │ + sync() / close() / __enter__ / __exit__                          │
 └────────────────────────────────────────────────────────────────────┘
+```
+
+## Layer 2 — classes
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│ Topic                                     «a registry, not one     │
+│                                            topic — see decisions»  │
+├────────────────────────────────────────────────────────────────────┤
+│ root/<name>/<partition>/00000000000000000000.log + .index          │
+│ Composes rather than implements: Log does the storing, Partitioner │
+│ the routing, SyncPolicy the durability. Owns name validation.      │
+├────────────────────────────────────────────────────────────────────┤
+│ - root:         Path                                               │
+│ - partitions:   int        default for NEW topics only (1)         │
+│ - sync_policy:  SyncPolicy shared, frozen; counters live per       │
+│                            partition in Topic                      │
+├────────────────────────────────────────────────────────────────────┤
+│ + create(name, partitions=None) -> int    idempotent, never        │
+│                                           re-partitions            │
+│ + get(name, partition=0) -> Log           raises UnknownTopic      │
+│ + append(name, key, value, timestamp=None) -> (partition, Offset)  │
+│ + read_from(name, offset, partition=0) -> Iterator[Record]         │
+│ + names() / exists(name) / partitions_of(name)                     │
+│ + sync() / close() / __enter__ / __exit__                          │
+└────────────────────────────────────────────────────────────────────┘
+      │ routes with                    │ asks
+      ▼                                ▼
+┌──────────────────────────────┐  ┌──────────────────────────────────┐
+│ Partitioner                  │  │ SyncPolicy  «frozen dataclass»   │
+├──────────────────────────────┤  ├──────────────────────────────────┤
+│ Append-side only: a consumer │  │ How much a power cut may lose.   │
+│ names its own partition.     │  │ records / millis, both optional, │
+│ Stateful only for round-     │  │ OR'd. Pure — the caller keeps    │
+│ robin, so one per Topic.     │  │ the counters, so it is shared.   │
+├──────────────────────────────┤  ├──────────────────────────────────┤
+│ + partition_for(key, n)      │  │ + should_sync(appends, millis)   │
+│     key  -> crc32(key) % n   │  │ SYNC_EVERY_RECORD / SYNC_NEVER   │
+│     None -> round-robin      │  │                                  │
+└──────────────────────────────┘  └──────────────────────────────────┘
 ```
 
 ## Record format
@@ -319,6 +360,60 @@ invariant `PREFIX_SIZE + size == Record.size()` must always hold.
   index all depend on, and would turn sequential writes into scattered ones.
   Parallelism comes from many independent logs, not from striping one.
 
+## Topic decisions
+
+- **`Topic` is a registry of topics, not one topic.** The name is inherited
+  from the roadmap; Kafka calls the equivalent `LogManager`. Worth knowing
+  when reading `topic.log(name)`-shaped code.
+- **Names are validated with a whitelist, and this is a security boundary.**
+  In phase B these arrive from a socket, so `../../etc` must not escape the
+  data root. Allowed: letters, digits, `.`, `_`, `-`, up to 200 chars. `.`
+  and `..` pass the charset check but *are* traversal, so they are rejected
+  by name — the same two-step check Kafka does.
+- **Appends auto-create; reads raise `UnknownTopic`.** A producer writing to
+  a new name is how topics come into existence (Kafka's
+  `auto.create.topics.enable`). A consumer naming a topic that isn't there
+  has almost certainly typo'd, and silently returning zero records from a
+  freshly conjured empty topic would never tell it so.
+- **`append` returns `(partition, offset)`.** Every partition numbers its
+  records from zero, so an offset without its partition is meaningless.
+- **Partition count belongs to the topic on disk, not to the registry.**
+  Reopening a 4-partition topic finds 4 whatever `Topic(partitions=…)` says,
+  and `create` never re-partitions an existing topic: changing the count
+  moves every key to a different partition and silently breaks the ordering
+  the partitioner exists to provide.
+- **Partitions nest (`root/<name>/<partition>/`)** rather than Kafka's flat
+  `orders-0/`, so listing topic names is an `iterdir` instead of parsing and
+  de-duplicating suffixes.
+- **`names()` reads the disk, not the cache.** A topic exists because its
+  directory does; otherwise a restart reports none until something touches
+  them.
+- **`crc32(key) % n`, never `hash(key)`.** Python randomizes `hash()` for
+  `str`/`bytes` per process (`PYTHONHASHSEED`), so a restarted broker would
+  reroute every key and split its history across two logs. A partitioner
+  must be stable across processes and hosts; Kafka uses murmur2 for the same
+  reason. Pinned by a test that runs three subprocesses under different
+  seeds.
+- **Keys route by hash, null keys round-robin.** Same key → same partition →
+  same log → relative order preserved. That is *why* Kafka's ordering
+  guarantee is per-partition, and why compaction needs a key to compact by.
+  Keyless records have no ordering relationship with anything.
+- **The partitioner is called on append only.** A consumer is *assigned* a
+  partition and asks for it by number, so reads never route. Merging
+  partitions is not offered: there is no correct order to merge them into.
+- **`SyncPolicy` is frozen and pure; the counters live in `Topic`.** One
+  policy instance is therefore shared by every partition of every topic.
+  Layer 2 decides *when* to fsync, layer 1 provides the mechanism
+  (`Log.sync()`) and never chooses.
+- **`SYNC_NEVER` is the default, and that is a real tradeoff.** Kafka
+  defaults the same way, but it can afford to: there, a record is durable
+  once *replicated*. We are single-node, so this default genuinely means a
+  power cut can lose the tail. Phase B's broker is where a deliberate choice
+  belongs.
+- **The time threshold is only checked on append.** An idle log never syncs
+  itself, because there is no background thread. Kafka runs a scheduler for
+  exactly this; ours would need one before `millis` means what it says.
+
 ## Roadmap
 
 ### Phase A — the log (files only, no network)
@@ -326,7 +421,7 @@ invariant `PREFIX_SIZE + size == Record.size()` must always hold.
 - [x] A2: `Segment` — one `.log` file per base offset, roll at a size limit
 - [x] A3: `Index` — sparse offset→position map, rebuildable
 - [x] A4: `Log` — many segments, logical offsets, recovery on open
-- [ ] A5: `Topic` — a directory of logs, one per topic name
+- [x] A5: `Topic` — a directory of logs, one per topic name
 
 ### Phase B — the broker (asyncio TCP)
 - [ ] B1: server accepts connections, speaks JSON-lines
@@ -339,10 +434,14 @@ invariant `PREFIX_SIZE + size == Record.size()` must always hold.
 - [ ] C2: offsets survive a broker restart (stored in a log, naturally)
 
 ### Stretch
-- partitions · retention/compaction · consistent hashing · Textual TUI
+- retention/compaction · consistent hashing · Textual TUI
 
-> Partitions are *modelled* in the layout (`Log` = one topic-partition) but not
-> implemented. Until the stretch phase there is exactly one log per topic.
+> Partitions landed with A5: `Topic(root, partitions=n)` gives a topic `n`
+> independent `Log`s, routed by key hash. **One `Log` is one topic-partition**,
+> and nothing below layer 2 knows partitions exist — parallelism comes from
+> many ordered logs, never from striping one across files, which would destroy
+> the total order offsets, recovery and the index all rest on. The default is
+> still `partitions=1`.
 
 ## Layout
 
