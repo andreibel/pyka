@@ -495,6 +495,25 @@ bench/
 `src/` layout on purpose: it stops an import resolving against the working
 directory instead of the installed package.
 
+## Install
+
+```sh
+pip install pyka-log            # the client: Producer, Consumer, Admin
+pip install 'pyka-log[broker]'  # plus everything needed to RUN a broker
+```
+
+The client pulls only `grpcio` and `protobuf` — a client has no business
+installing a web framework. The distribution is `pyka-log` because `pyka` is
+taken on PyPI (by an Apache Kafka client, of all things); the import name is
+still `pyka`.
+
+Or just run the container:
+
+```sh
+docker run -p 9092:9092 -p 8080:8080 -v pyka-data:/var/lib/pyka \
+    ghcr.io/andreibel/pyka:latest
+```
+
 ## Using it from Python
 
 ```python
@@ -723,7 +742,7 @@ it is the large project this design deliberately defers.
 ## Dev
 
 ```sh
-uv sync                    # create the venv
+uv sync --all-extras       # venv, including the broker extra
 uv run pytest              # 451 tests
 ./scripts/gen_proto.sh     # regenerate stubs after editing the .proto
 uv run python bench/bench_seek.py

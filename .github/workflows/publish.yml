@@ -6,21 +6,65 @@ on:
   workflow_dispatch:
 
 jobs:
-  publish:
+  # ------------------------------------------------------------------ PyPI
+  pypi:
+    runs-on: ubuntu-latest
+    environment: pypi          # add required reviewers here to gate releases
+    permissions:
+      id-token: write          # the ONLY credential needed — see below
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Tests must pass before anything is published
+        run: |
+          uv sync --all-extras
+          uv run pytest -q
+
+      - name: Check the tag matches the version in pyproject.toml
+        # A tag that disagrees with the metadata publishes a version nobody
+        # can find later. Cheap check, saves a yanked release.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(uv run python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          test "$tag" = "$version" || {
+            echo "::error::tag $GITHUB_REF_NAME does not match version $version in pyproject.toml"
+            exit 1
+          }
+
+      - name: Build
+        run: uv build
+
+      - name: Check the metadata renders on PyPI
+        run: uvx twine check dist/*
+
+      - name: Publish
+        # Trusted Publishing (OIDC): PyPI verifies this workflow's identity
+        # directly, so there is no API token in the repository to leak or
+        # rotate. Configure it once at
+        # https://pypi.org/manage/project/pyka-log/settings/publishing/
+        # with owner=andreibel, repo=pyKA, workflow=publish.yml, env=pypi.
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  # --------------------------------------------------------------- container
+  container:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
-
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
-        # ghcr.io rather than Docker Hub: GITHUB_TOKEN already exists, so
-        # there is no account to create and no secret to rotate. Swap in
-        # docker/login-action with DOCKERHUB_TOKEN if you want Docker Hub too.
+        # ghcr.io rather than Docker Hub: GITHUB_TOKEN already exists, so there
+        # is no account to create and no secret to rotate. Add a
+        # docker/login-action step with DOCKERHUB_TOKEN to push to both.
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -40,8 +84,8 @@ jobs:
         with:
           context: .
           push: true
-          # Both architectures: Apple Silicon laptops and x86 servers pull the
-          # same tag and each gets a native image.
+          # Both architectures: Apple Silicon laptops and x86 servers pull one
+          # tag and each gets a native image.
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

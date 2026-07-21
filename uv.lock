@@ -482,15 +482,19 @@ wheels = [
 ]
 
 [[package]]
-name = "pyka"
+name = "pyka-log"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "fastapi" },
     { name = "grpcio" },
+    { name = "protobuf" },
+]
+
+[package.optional-dependencies]
+broker = [
+    { name = "fastapi" },
     { name = "grpcio-health-checking" },
     { name = "grpcio-reflection" },
-    { name = "protobuf" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -505,13 +509,14 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastapi", specifier = ">=0.115" },
+    { name = "fastapi", marker = "extra == 'broker'", specifier = ">=0.115" },
     { name = "grpcio", specifier = ">=1.68" },
-    { name = "grpcio-health-checking", specifier = ">=1.68" },
-    { name = "grpcio-reflection", specifier = ">=1.68" },
+    { name = "grpcio-health-checking", marker = "extra == 'broker'", specifier = ">=1.68" },
+    { name = "grpcio-reflection", marker = "extra == 'broker'", specifier = ">=1.68" },
     { name = "protobuf", specifier = ">=5.28" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+    { name = "uvicorn", extras = ["standard"], marker = "extra == 'broker'", specifier = ">=0.32" },
 ]
+provides-extras = ["broker"]
 
 [package.metadata.requires-dev]
 dev = [

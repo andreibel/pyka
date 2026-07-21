@@ -13,7 +13,19 @@ import os
 import signal
 from pathlib import Path
 
-import uvicorn
+try:
+    import uvicorn
+except ModuleNotFoundError as err:  # pragma: no cover — a packaging path
+    # `pip install pyka-log` gets the CLIENT — Producer, Consumer, Admin — and
+    # nothing else, because a client has no business pulling a web framework.
+    # Running a broker is the extra. A bare ModuleNotFoundError three frames
+    # deep would send someone hunting for a bug that is really a missing flag.
+    raise SystemExit(
+        f"pyka-broker needs the broker dependencies (missing: {err.name}).\n"
+        "They are an optional extra:\n"
+        "    pip install 'pyka-log[broker]'\n"
+        "    uv sync --all-extras          # from a checkout"
+    ) from err
 
 from pyka.broker.admin import create_app
 from pyka.broker.server import DEFAULT_GRACE, DEFAULT_PORT, BrokerServer

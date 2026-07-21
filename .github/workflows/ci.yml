@@ -22,7 +22,9 @@ jobs:
           enable-cache: true
 
       - name: Install
-        run: uv sync --frozen
+        # --all-extras: the broker deps are an optional extra, and the
+        # tests exercise the broker.
+        run: uv sync --frozen --all-extras
 
       - name: Check the generated stubs are current
         # The protobuf stubs are committed so `uv sync && pytest` needs no
