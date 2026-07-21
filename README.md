@@ -429,24 +429,41 @@ invariant `PREFIX_SIZE + size == Record.size()` must always hold.
 - [x] A5: `Topic` — a directory of logs, one per topic name
 
 ### Phase B — the broker (gRPC on asyncio)
-- [ ] B1: `.proto` defined, stubs generated, `grpc.aio` server with health
-- [ ] B2: `produce` command appends to a topic's log
-- [ ] B3: `consume` command streams records from an offset
-- [ ] B4: live tail — consumers get new records as they arrive
+- [x] B1: `.proto` defined, stubs generated, `grpc.aio` server with health
+- [x] B1b: FastAPI control plane on :8080, same process, shared `Topic`
+- [ ] B2: `Produce` appends to a topic's log — **needs `Log`'s `threading.Lock` first**
+- [ ] B3: `Consume` server-streams records from an offset
+- [ ] B4: live tail — `follow=true` keeps the stream open (`asyncio.Event` per partition)
+
+### Phase D — Kubernetes (the deployment is the lesson)
+- [ ] D1: Dockerfile, non-root, `PYKA_DATA_DIR` as a volume
+- [ ] D2: StatefulSet `replicas: 1` + headless Service + PVC + gRPC probes
+- [ ] D3: `kubectl delete pod` → watch recovery rebuild state from the PVC
+- [ ] D4: `Metadata` RPC + client-side partitioning (~50 lines; where `Ring` gets a caller)
+- [ ] D5: `replicas: 3` — real sharding, then **kill a pod and watch a partition go dark**
 
 ### Phase C — consumer offsets
 - [ ] C1: broker tracks each consumer group's committed offset
-- [ ] C2: offsets survive a broker restart (stored in a log, naturally)
+- [ ] C2: offsets survive a restart — stored in a log, keyed `group/topic/partition`,
+      which is exactly what tombstones and compaction were reserved for in A1
 
-### Stretch
-- retention/compaction · consistent hashing · Textual TUI
+### Stretch — pick by appetite, none are required
+- **retention** — delete sealed segments past an age/size bound. Small, and the
+  reason `roll()` exists. Also the answer to "the PVC filled up".
+- **replication** — leader/follower, ISR, high-water-mark, election. The big one:
+  larger than everything above combined, and the only thing that buys
+  *availability*. A follower is just a consumer, so B3 is its prerequisite.
+- consistent hashing (only if `p % N` rebalancing actually hurts) · compaction ·
+  Prometheus metrics on :8080 · Textual TUI
 
-> Partitions landed with A5: `Topic(root, partitions=n)` gives a topic `n`
-> independent `Log`s, routed by key hash. **One `Log` is one topic-partition**,
-> and nothing below layer 2 knows partitions exist — parallelism comes from
-> many ordered logs, never from striping one across files, which would destroy
-> the total order offsets, recovery and the index all rest on. The default is
-> still `partitions=1`.
+> **Sharding vs replication.** Everything built so far is *sharding*: a
+> partition exists exactly once, and `Ring` says where. That buys capacity, not
+> availability — a broker being down makes its partitions unreachable.
+> *Replication* (copies of each partition) is what buys availability, and it is
+> also what lets Kafka be durable without fsync: `acks=all` means the record is
+> in three machines' page cache, which is both cheaper and stronger than one
+> local fsync. That is why our `SYNC_NEVER` default is copied from Kafka and
+> means something different here — same default, no replication behind it.
 
 ## Layout
 
