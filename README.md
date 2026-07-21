@@ -258,13 +258,23 @@ invariant `PREFIX_SIZE + size == Record.size()` must always hold.
   file, so rebuilding rides along for free. Trusting the index to *seed* the
   scan needs a clean-shutdown marker we don't have yet — that's the
   optimization to measure later, not now.
+- **`CorruptRecord` is swallowed only at the hint position.** A hint can lie
+  three ways — EOF, a wrong offset, or bytes that don't decode at all — and
+  all three fall back to the scan from byte 0, because the log hasn't been
+  convicted, the hint has. Once scanning from a *verified* boundary,
+  corruption is the log's own and propagates loudly.
+- **Sync order: log first, index second.** An index made durable ahead of its
+  log can point past the end of the file; a stale index merely rebuilds.
+- **Measured (bench/bench_seek.py):** time-to-first-record went from linear —
+  5.8/23/93/377 ms at 1/4/16/64 MiB, a clean 4.0x per 4x of file — to a flat
+  ~0.03 ms at every size. The index turns O(file) reads into O(interval).
 
 ## Roadmap
 
 ### Phase A — the log (files only, no network)
 - [x] A1: `Record` — framing, crc, encode/decode/read_one, torn-tail handling
 - [x] A2: `Segment` — one `.log` file per base offset, roll at a size limit
-- [ ] A3: `Index` — sparse offset→position map, rebuildable
+- [x] A3: `Index` — sparse offset→position map, rebuildable
 - [ ] A4: `Log` — many segments, logical offsets, recovery on open
 - [ ] A5: `Topic` — a directory of logs, one per topic name
 
@@ -295,6 +305,8 @@ src/pyka/
   cli/       entry points — broker.py
 tests/
   storage/  topic/  broker/
+bench/
+  bench_seek.py   time-to-first-record vs log size; results/ holds both runs
 ```
 
 `src/` layout on purpose: it stops an import resolving against the working
