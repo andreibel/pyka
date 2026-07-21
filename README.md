@@ -101,14 +101,19 @@ seek/write/offset-increment before B2 lands.
                      ▲ many Segments (each with its own private Index —
                      │ Log never sees or touches an Index)
 ┌────────────────────────────────────────────────────────────────────┐
-│ Log                                                  NOT WRITTEN   │
+│ Log                                                                │
 ├────────────────────────────────────────────────────────────────────┤
-│ One topic-partition = an ordered list of Segments.                 │
-│ Owns the next logical offset. Only the last segment is writable.   │
+│ One topic-partition = an ordered chain of Segments in one dir.     │
+│ Owns the next logical offset, so callers pass payloads and never   │
+│ offsets. Only the tail is open for writing; the rest are closed    │
+│ and still serve reads. Raises CorruptLog if the chain has a gap.   │
 ├────────────────────────────────────────────────────────────────────┤
-│ + append(key, value) -> int             returns logical offset     │
-│ + read_from(offset) -> Iterator[Record]                            │
-│ + close() -> None                                                  │
+│ - directory:         Path  Log creates it; Segment never does      │
+│ - max_segment_bytes: int   roll threshold, passed down (1 GiB)     │
+│ + next_offset -> Offset                  delegated to the tail     │
+│ + append(key, value, timestamp=None) -> Offset   None = now, in ms │
+│ + read_from(offset) -> Iterator[Record]  crosses segments          │
+│ + sync() / close() / __enter__ / __exit__                          │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -269,13 +274,58 @@ invariant `PREFIX_SIZE + size == Record.size()` must always hold.
   5.8/23/93/377 ms at 1/4/16/64 MiB, a clean 4.0x per 4x of file — to a flat
   ~0.03 ms at every size. The index turns O(file) reads into O(interval).
 
+## Log decisions
+
+- **`append` takes a key and a value, not a `Record`.** `Log` owns the offset
+  sequence, so it stamps the offset itself: a wrong offset is not rejected,
+  it is unconstructible. `Segment.append` still checks, but that check now
+  guards `Log`'s bookkeeping rather than the caller's arithmetic.
+- **Sealing a segment means *closing* it.** `Segment.close()` drops only the
+  write handles — `read_from` opens its own handle per call and `lookup`
+  bisects an in-memory list, so a closed segment still serves reads. "Only
+  the tail is writable" is therefore physical rather than an `if`: a sealed
+  segment has no handle to append with. Open fds stay at ~2 for the whole
+  log instead of 2 per segment.
+- **The chain is checked for continuity on open, and a gap is fatal.**
+  `segments[i+1].base_offset == segments[i].next_offset`, else `CorruptLog`.
+  A hole means records are silently missing from every read; loud over
+  silent, the same verdict as mid-file corruption.
+- **Deleting a segment has three different outcomes**, and only one is an
+  error. From the *middle* → `CorruptLog`, because the next file disagrees.
+  From the *front* → opens fine and shorter: still continuous, and
+  indistinguishable from retention, which will do exactly this on purpose.
+  From the *back* → opens fine and **reissues the lost offsets**, because
+  there is no file after it to disagree with. That last one is undetectable
+  without a recovery checkpoint we don't have; it is pinned by a test rather
+  than defended.
+- **Rolling builds the record first, then asks.** `has_room_for` needs the
+  record's size, and the roll target is `Segment(dir, offset)` — so the new
+  base equals the next offset by construction, and the chain invariant is
+  maintained by the same line that rolls. An empty segment accepts anything,
+  so a roll can never happen twice for one record.
+- **`next_offset` is delegated to the tail, not duplicated.** Two copies of
+  one truth drift; the tail segment already maintains it.
+- **`read_from` past the end yields nothing; before the start raises.** A
+  consumer polling at the head is normal, not an error. Asking for offsets
+  that never existed here is a caller bug — and once retention lands, the
+  same check will mean "already deleted".
+- **Reads are a floor-search, exactly like `Index.lookup`.** The segment that
+  can hold an offset is the last one whose base is `<=` it; from there on,
+  each later segment is read from *its own* base. Two levels of the same
+  find-the-floor-then-scan-forward shape.
+- **One `Log` is one topic-partition.** Partitioning by key hash belongs to
+  layer 2 (`topic/partitioner.py`), never here: splitting one partition
+  across files would destroy the total order that offsets, recovery and the
+  index all depend on, and would turn sequential writes into scattered ones.
+  Parallelism comes from many independent logs, not from striping one.
+
 ## Roadmap
 
 ### Phase A — the log (files only, no network)
 - [x] A1: `Record` — framing, crc, encode/decode/read_one, torn-tail handling
 - [x] A2: `Segment` — one `.log` file per base offset, roll at a size limit
 - [x] A3: `Index` — sparse offset→position map, rebuildable
-- [ ] A4: `Log` — many segments, logical offsets, recovery on open
+- [x] A4: `Log` — many segments, logical offsets, recovery on open
 - [ ] A5: `Topic` — a directory of logs, one per topic name
 
 ### Phase B — the broker (asyncio TCP)
