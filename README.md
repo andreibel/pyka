@@ -57,8 +57,11 @@ a log broker actually works, this one is short enough to read in an evening.
 ```sh
 docker run --rm -p 9092:9092 -p 8080:8080 \
     -v pyka-data:/var/lib/pyka \
-    ghcr.io/andreibel/pyka:latest
+    ghcr.io/andreibel/pyka:main
 ```
+
+Tags: `:main` tracks the latest green build, `:sha-<commit>` pins one exactly,
+and `:0.1.0` / `:latest` appear once a version is released.
 
 Then, from Python:
 
