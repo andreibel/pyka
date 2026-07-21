@@ -163,7 +163,40 @@ def test_from_env_reads_the_ordinal_out_of_the_hostname(monkeypatch):
 def test_from_env_defaults_to_a_cluster_of_one(monkeypatch):
     monkeypatch.setenv("HOSTNAME", "pyka-0")
     monkeypatch.delenv("PYKA_BROKERS", raising=False)
-    assert Ring.from_env() == Ring(brokers=1, me=0)
+    monkeypatch.delenv("PYKA_ADDRESS_TEMPLATE", raising=False)
+    ring = Ring.from_env()
+    assert (ring.brokers, ring.me) == (1, 0)
+
+
+def test_from_env_advertises_localhost_by_default(monkeypatch):
+    """The default has to describe the DEFAULT deployment: one broker on a
+    machine, reachable at localhost.
+
+    Defaulting to the Kubernetes name meant a broker started on a laptop told
+    every client to dial `pyka-0.pyka-hl:9092`, which resolves nowhere — so
+    the README's own first example failed with a DNS error.
+    """
+    monkeypatch.setenv("HOSTNAME", "pyka-0")
+    monkeypatch.delenv("PYKA_ADDRESS_TEMPLATE", raising=False)
+    monkeypatch.delenv("PYKA_BROKERS", raising=False)
+    monkeypatch.setenv("PYKA_PORT", "9095")
+    assert Ring.from_env().address_of(0) == "localhost:9095"
+
+
+def test_from_env_keeps_the_template_when_the_hostname_has_no_ordinal(monkeypatch):
+    """The bug this pair of changes fixes.
+
+    from_env used to raise on any hostname without an ordinal, and the caller
+    caught it and rebuilt the ring from defaults — silently throwing away
+    PYKA_ADDRESS_TEMPLATE. Setting the variable appeared to do nothing.
+    """
+    monkeypatch.setenv("HOSTNAME", "Andreis-MacBook-Pro.local")
+    monkeypatch.delenv("PYKA_BROKERS", raising=False)
+    monkeypatch.setenv("PYKA_ADDRESS_TEMPLATE", "my-host:7000")
+
+    ring = Ring.from_env()
+    assert (ring.brokers, ring.me) == (1, 0)
+    assert ring.address_of(0) == "my-host:7000"
 
 
 def test_from_env_honours_the_address_template(monkeypatch):
@@ -173,11 +206,20 @@ def test_from_env_honours_the_address_template(monkeypatch):
     assert Ring.from_env().address_of(1) == "kafka-1.internal:9000"
 
 
-def test_from_env_rejects_a_hostname_without_an_ordinal(monkeypatch):
-    # A Deployment gives pods random names like pyka-7d4f-x9k2 — the failure
-    # this project's README argues against, caught loudly at startup.
-    monkeypatch.setenv("HOSTNAME", "pyka-7d4f-x9k2")
-    with pytest.raises(ValueError, match="no StatefulSet ordinal"):
+def test_a_hostname_without_an_ordinal_is_fine_for_one_broker(monkeypatch):
+    # Laptops are not called pyka-0. With a single broker there is nothing to
+    # identify, so demanding an ordinal only ever blocked local use.
+    monkeypatch.setenv("HOSTNAME", "Andreis-MacBook-Pro.local")
+    monkeypatch.delenv("PYKA_BROKERS", raising=False)
+    assert Ring.from_env().me == 0
+
+
+def test_a_hostname_without_an_ordinal_is_fatal_in_a_cluster(monkeypatch):
+    # With more than one broker, identity decides who owns what. Guessing 0
+    # would make two brokers claim the same partitions.
+    monkeypatch.setenv("HOSTNAME", "pyka-7d4f-x9k2")  # a Deployment pod name
+    monkeypatch.setenv("PYKA_BROKERS", "3")
+    with pytest.raises(ValueError, match="cannot tell which of 3"):
         Ring.from_env()
 
 

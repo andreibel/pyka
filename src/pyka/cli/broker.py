@@ -49,16 +49,27 @@ def _store_from_env() -> Store:
     # resizes and puts partition 0 of every topic on broker 0. Ring is kept
     # for the comparison, selectable for anyone who wants the simpler rule.
     ring_class = Ring if os.environ.get("PYKA_RING") == "modulo" else HashRing
+    # No try/except: from_env handles a laptop hostname itself. Catching its
+    # ValueError and rebuilding the ring from defaults silently discarded
+    # PYKA_ADDRESS_TEMPLATE, so a broker advertised a Kubernetes DNS name to
+    # clients that could not resolve it — and said nothing about why.
+    ring = ring_class.from_env()
+
+    root = Path(os.environ.get("PYKA_DATA_DIR", DEFAULT_ROOT))
     try:
-        ring = ring_class.from_env()
-    except ValueError:
-        # No StatefulSet ordinal in the hostname — running on a laptop, or in
-        # a Deployment, which this design deliberately does not support for
-        # more than one replica.
-        ring = ring_class(brokers=1, me=0)
+        root.mkdir(parents=True, exist_ok=True)
+    except PermissionError as err:
+        # The default suits a container, where /var/lib/pyka is a mounted
+        # volume owned by the broker. On a laptop it is root-owned, and a
+        # bare PermissionError traceback is a miserable first impression.
+        raise SystemExit(
+            f"cannot use {root} as the data directory: {err.strerror}.\n"
+            "Set PYKA_DATA_DIR to somewhere writable, for example:\n"
+            "    PYKA_DATA_DIR=./data pyka-broker"
+        ) from err
 
     return Store(
-        root=Path(os.environ.get("PYKA_DATA_DIR", DEFAULT_ROOT)),
+        root=root,
         partitions=int(os.environ.get("PYKA_PARTITIONS", "1")),
         sync_policy=SyncPolicy(
             records=_optional_int("PYKA_SYNC_RECORDS"),

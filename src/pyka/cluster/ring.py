@@ -123,27 +123,43 @@ class Ring:
 
     @classmethod
     def from_env(cls) -> "Ring":
-        """Build from the environment a StatefulSet pod is born with.
+        """Build from the environment a broker is started with.
 
         ``me`` comes from the ordinal suffix of the hostname (pyka-1 -> 1) —
-        the identity k8s guarantees is stable across restarts, so a broker
-        learns who it is by looking in the mirror rather than being told.
-        ``brokers`` must be supplied, because a pod cannot see its own
+        the identity Kubernetes guarantees is stable across restarts, so a
+        broker learns who it is by looking in the mirror rather than being
+        told. ``brokers`` must be supplied, because a pod cannot see its own
         StatefulSet's replica count.
+
+        A hostname with no ordinal is fine for a single broker — laptops are
+        not called ``pyka-0`` — and only an error once there is more than one,
+        where identity actually decides who owns what.
         """
+        brokers = int(os.environ.get("PYKA_BROKERS", "1"))
+        port = os.environ.get("PYKA_PORT", "9092")
+
         hostname = os.environ.get("HOSTNAME") or socket.gethostname()
-        _, _, ordinal = hostname.rpartition("-")
-        if not ordinal.isdigit():
+        _, _, suffix = hostname.rpartition("-")
+        if suffix.isdigit():
+            me = int(suffix)
+        elif brokers == 1:
+            me = 0
+        else:
             raise ValueError(
-                f"hostname {hostname!r} has no StatefulSet ordinal suffix — "
-                f"expected something like 'pyka-1'"
+                f"hostname {hostname!r} has no ordinal suffix, so this broker "
+                f"cannot tell which of {brokers} it is — expected something "
+                f"like 'pyka-1' (a StatefulSet pod name)"
             )
+
+        # The default describes the default deployment: one broker, reachable
+        # on localhost. The Kubernetes form is `pyka-{ordinal}.pyka-hl:9092`
+        # and belongs in the manifest, because only the deployment knows how
+        # clients will reach it. Getting this wrong is invisible until a
+        # client follows a Metadata response into a name that does not resolve.
         return cls(
-            brokers=int(os.environ.get("PYKA_BROKERS", "1")),
-            me=int(ordinal),
-            address_template=os.environ.get(
-                "PYKA_ADDRESS_TEMPLATE", "pyka-{ordinal}.pyka-hl:9092"
-            ),
+            brokers=brokers,
+            me=me,
+            address_template=os.environ.get("PYKA_ADDRESS_TEMPLATE", f"localhost:{port}"),
         )
 
 

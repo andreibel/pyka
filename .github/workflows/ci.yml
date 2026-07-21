@@ -53,6 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: docker/setup-qemu-action@v3    # cross-build arm64 on an amd64 runner
       - uses: docker/setup-buildx-action@v3
 
       - name: Build
@@ -113,6 +114,10 @@ jobs:
         with:
           context: .
           push: true
+          # Both architectures. Without this the image is built for the
+          # runner only (amd64), and `docker pull` fails outright on any
+          # Apple Silicon machine — which is most laptops that will try it.
+          platforms: linux/amd64,linux/arm64
           tags: |
             ghcr.io/${{ github.repository_owner }}/pyka:main
             ghcr.io/${{ github.repository_owner }}/pyka:sha-${{ github.sha }}
