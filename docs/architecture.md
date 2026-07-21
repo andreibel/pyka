@@ -243,9 +243,19 @@ Note what is **absent**: the partitioner. A consumer names its partition —
 it was assigned one — so reads never route by key. Partitioning is an
 append-side concern only.
 
+**Built as of B3**, minus the waiting: the stream reads in batches of 500 and
+ends when the log does. Errors split three ways — `NOT_FOUND` for an unknown
+topic, `INVALID_ARGUMENT` for a bad partition or name, and `OUT_OF_RANGE` for
+an offset before the log starts, which is a consumer's signal to reset rather
+than retry.
+
 > **Open design (B4):** "wait for new appends" needs a notification. The
 > natural shape is an `asyncio.Event` per (topic, partition) that `append`
 > sets and waiting streams await. Polling would work and be uglier.
+>
+> The wrinkle: `append` runs in a worker thread (via `to_thread`) while the
+> waiting stream is on the event loop, and `asyncio.Event` is **not**
+> thread-safe. The signal has to cross with `loop.call_soon_threadsafe`.
 
 ---
 

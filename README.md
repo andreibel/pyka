@@ -551,7 +551,7 @@ grpcurl -plaintext localhost:9092 list
 
 ```sh
 uv sync                    # create the venv
-uv run pytest              # 379 tests
+uv run pytest              # 400 tests
 ./scripts/gen_proto.sh     # regenerate stubs after editing the .proto
 uv run python bench/bench_seek.py
 ```
