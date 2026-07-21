@@ -149,6 +149,24 @@ class _Connection:
                 last = err  # this broker is down; try the next one
         raise PykaError(f"no bootstrap broker answered: {last}") from last
 
+    def await_topic(self, topic: str, timeout: float = 30.0) -> dict[int, str]:
+        """Block until ``topic`` exists, then return its routing.
+
+        For the ordinary startup race: a consumer comes up before the service
+        that produces to its topic. Raises UnknownTopic if the wait runs out,
+        so a genuine typo still surfaces rather than hanging forever.
+        """
+        deadline = time.monotonic() + timeout
+        delay = 0.25
+        while True:
+            try:
+                return self.routing(topic, refresh=True)
+            except UnknownTopic:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 2.0)
+
     def partition_for(self, topic: str, key: bytes | None) -> int:
         """The same crc32(key) % n the broker computes.
 
@@ -285,6 +303,7 @@ class Consumer(_Connection):
         offset: int = 0,
         follow: bool = False,
         limit: int = 0,
+        wait_for_topic: float = 0.0,
     ) -> Iterator[Record]:
         """Yield records from ``offset`` onward.
 
@@ -292,9 +311,17 @@ class Consumer(_Connection):
         ``follow=True`` never ends: it blocks and yields new records as they
         are appended. ``limit`` is ignored while following.
 
+        ``wait_for_topic`` blocks up to that many seconds for the topic to
+        come into existence instead of raising UnknownTopic. Services start in
+        whatever order the scheduler feels like, so a consumer routinely comes
+        up before whatever produces its topic; without this, the consumer
+        crashes and the restart is doing the waiting for you.
+
         Each record carries its own offset, which is how a caller knows where
         to resume after a restart.
         """
+        if wait_for_topic > 0:
+            self.await_topic(topic, wait_for_topic)
         address = self.routing(topic)[partition]
         request = pb.ConsumeRequest(
             topic=topic,

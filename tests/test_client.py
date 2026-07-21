@@ -424,3 +424,46 @@ def test_admin_raises_on_an_illegal_name(admin):
     # The security boundary is on the server; the client just reports it.
     with pytest.raises(PykaError):
         admin.create_topic("../escape", 1)
+
+
+# --------------------------------------------------------------------------
+# the startup race: a consumer that comes up before its topic exists
+# --------------------------------------------------------------------------
+
+
+def test_await_topic_returns_once_the_topic_appears(cluster):
+    """Services start in whatever order the scheduler likes, so a consumer
+    routinely comes up before whatever produces to its topic. Without this it
+    crashes on UnknownTopic and the restart loop does the waiting."""
+    import threading
+
+    with Consumer(cluster.addresses) as consumer:
+        with pytest.raises(UnknownTopic):
+            consumer.routing("payments")
+
+        threading.Timer(0.4, lambda: cluster.create("payments")).start()
+        routing = consumer.await_topic("payments", timeout=10)
+
+    assert len(routing) == PARTITIONS
+
+
+def test_await_topic_still_gives_up_on_a_typo(cluster):
+    # A wait that never ends would turn a misspelled topic into a hang.
+    with Consumer(cluster.addresses) as consumer:
+        with pytest.raises(UnknownTopic):
+            consumer.await_topic("nope", timeout=0.5)
+
+
+def test_consume_can_wait_for_its_topic(cluster):
+    import threading
+
+    def create_and_produce():
+        cluster.create("late")
+        cluster.run(cluster.stores[0].append("late", b"k", b"arrived", partition=0))
+
+    threading.Timer(0.4, create_and_produce).start()
+    with Consumer(cluster.addresses) as consumer:
+        records = list(
+            consumer.consume("late", 0, limit=1, wait_for_topic=10)
+        )
+    assert [r.value for r in records] == [b"arrived"]

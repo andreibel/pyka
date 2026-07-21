@@ -75,6 +75,14 @@ merge two partitions: each numbers from zero and nothing relates them. To read
 a whole topic, run one consumer per partition — which is exactly how consumer
 groups parallelise.
 
+### `await_topic(topic, timeout=30.0) -> dict[int, str]`
+
+Blocks until the topic exists. Services start in whatever order the scheduler
+likes, so a consumer routinely comes up before whatever produces to its topic;
+without this it raises `UnknownTopic` and the restart loop does the waiting.
+`consume(..., wait_for_topic=30)` is the same thing inline. Both still give up
+at the deadline, so a misspelled topic surfaces instead of hanging.
+
 ### `partitions(topic) -> list[int]`
 
 ---
@@ -158,6 +166,13 @@ except DeliveryFailed as err:
 ---
 
 ## Semantics — read this part
+
+**Partition balance depends on how many distinct keys you have.** A key always
+maps to one partition, so *n* distinct keys can occupy at most *n* partitions —
+and with few keys, collisions are ordinary. Four keys over three partitions land
+on the same one about 4% of the time. That is small-sample statistics, not a
+bad hash: measured over 3,000 keys the distribution is even. If you want records
+spread over six partitions, you need many more than six distinct keys.
 
 **Ordering is per key, not per topic.** Same key → same partition → same log →
 records come back in exactly the order they were sent. Across partitions there
