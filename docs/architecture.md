@@ -6,9 +6,10 @@ end to end when a record is produced and consumed.
 
 ---
 
-## 1. The layering was drawn upside down
+## 1. `cluster/` is not a layer above the others
 
-The README shows four layers with `cluster/` on top. The code says otherwise:
+An early draft of this project drew four layers with `cluster/` on top. The
+code says otherwise:
 
 ```
 $ grep -rn "from pyka" src/pyka/cluster/     →  nothing
@@ -193,14 +194,14 @@ partition, because it must know *which broker to open a socket to* — and you
 can only know that after you know the partition. A broker receiving someone
 else's partition would have to forward it: two network hops per record.
 
-Today, with one broker, this degenerates harmlessly — any broker owns
-everything, so a client that skips metadata and lets the server partition is
-correct. That is exactly what `Topic.append` does now.
+With one broker this degenerates harmlessly: every partition is local, so a
+client that skips metadata and lets the server route is correct.
 
-> **Open decision:** `ProduceRequest` has no `partition` field. To support
-> client-side partitioning we would add `optional int32 partition` — absent
-> means "server, you choose" (convenient, single-broker), present means
-> "I already routed this, verify you own it". Both modes, one message.
+**Implemented.** `ProduceRequest` carries `optional int32 partition`: absent
+means "server, you choose" (convenient on a single broker), present means "I
+already routed this, verify you own it". Either way the broker checks
+ownership and answers `FAILED_PRECONDITION` — naming the right broker and its
+address — when the partition is not its own.
 
 ---
 
