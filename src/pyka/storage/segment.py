@@ -20,6 +20,19 @@ class Segment:
         self._next_offset, self._position = self._recover()
         self._file = open(self._log_path, "ab")
 
+    @property
+    def base_offset(self) -> Offset:
+        return self._base_offset
+
+    @property
+    def next_offset(self) -> Offset:
+        """One past the last record — what the next append must carry.
+
+        Log reads this to stamp offsets and to check chain continuity;
+        read-only because only append/_recover may ever move it.
+        """
+        return self._next_offset
+
     def _recover(self) -> tuple[Offset, Position]:
         """Scan the log, returning (next_offset, end of the last good record).
 
