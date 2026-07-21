@@ -47,9 +47,11 @@ the write is durable *is* the guarantee.
 The seam is `await asyncio.to_thread(log.append, record)`. The event loop stays
 free for sockets, where concurrency actually pays.
 
-Consequence to remember: `to_thread` means several connections can reach the
-same `Log` at once, so `Log.append` will need a `threading.Lock` around
-seek/write/offset-increment before B2 lands.
+Consequence, now handled: `to_thread` means several connections can reach the
+same `Log` at once, so `Log.append` holds a `threading.RLock` around
+claim-offset / choose-segment / write. Reentrant because `append` calls
+`roll`. Without it, 4 threads x 50 appends produced 2 usable records and a log
+that would not reopen — measured, not theorised.
 
 ## Layer 1 — classes
 
@@ -80,7 +82,7 @@ seek/write/offset-increment before B2 lands.
 │ + append(record) -> Position     byte position it starts at        │
 │ + read_from(offset) -> Iterator[Record]      absolute offsets only │
 │ + has_room_for(record) -> bool   ask BEFORE appending              │
-│ + is_full() -> bool                                                │
+│ + base_offset / next_offset / size_bytes / sealed / index_entries  │
 │ + sync() / close() / __enter__ / __exit__                          │
 │ - _recover() -> (Offset, Position)   runs in __init__, truncates   │
 └────────────────────────────────────────────────────────────────────┘
@@ -119,6 +121,8 @@ seek/write/offset-increment before B2 lands.
 │ + next_offset -> Offset                  delegated to the tail     │
 │ + append(key, value, timestamp=None) -> Offset   None = now, in ms │
 │ + read_from(offset) -> Iterator[Record]  crosses segments          │
+│ + roll() -> Segment        seal the tail; no-op when it is empty   │
+│ + segments -> tuple[Segment, ...]                                  │
 │ + sync() / close() / __enter__ / __exit__                          │
 └────────────────────────────────────────────────────────────────────┘
 ```
@@ -431,7 +435,7 @@ invariant `PREFIX_SIZE + size == Record.size()` must always hold.
 ### Phase B — the broker (gRPC on asyncio)
 - [x] B1: `.proto` defined, stubs generated, `grpc.aio` server with health
 - [x] B1b: FastAPI control plane on :8080, same process, shared `Topic`
-- [ ] B2: `Produce` appends to a topic's log — **needs `Log`'s `threading.Lock` first**
+- [x] B2: `Produce` + `ProduceStream` append to a topic's log
 - [ ] B3: `Consume` server-streams records from an offset
 - [ ] B4: live tail — `follow=true` keeps the stream open (`asyncio.Event` per partition)
 
@@ -488,9 +492,65 @@ bench/
 `src/` layout on purpose: it stops an import resolving against the working
 directory instead of the installed package.
 
+## Running it
+
+```sh
+uv sync
+
+PYKA_DATA_DIR=/tmp/pyka PYKA_PARTITIONS=3 PYKA_SEGMENT_BYTES=60000 uv run pyka-broker
+```
+
+Two ports: **gRPC on 9092** (produce/consume) and **REST on 8080** (topics,
+segments, probes). Interactive docs at <http://localhost:8080/docs>.
+
+`scripts/demo.py` is a hand client for poking it:
+
+```sh
+./scripts/demo.py create  orders 3          # REST
+./scripts/demo.py produce orders user-1 hi  # gRPC
+./scripts/demo.py bulk    orders 500        # gRPC streaming
+./scripts/demo.py topics
+./scripts/demo.py show    orders 2          # the segment chain
+```
+
+`show` is the one worth watching — it prints the storage layer directly:
+
+```
+partition 2: next_offset=309 total=80,101 bytes
+  base        0        59,827 bytes     14 index entries  SEALED
+  base      231        20,274 bytes      4 index entries  active
+```
+
+Produce past `PYKA_SEGMENT_BYTES` and a segment seals and a new one appears.
+Kill the broker (`Ctrl-C`) and restart it on the same `PYKA_DATA_DIR`: the log
+recovers, offsets continue, nothing is lost — which is the whole point, and
+the same thing that will happen on `kubectl delete pod`.
+
+Or with plain `curl` / `grpcurl` (reflection is enabled, so no `.proto` needed):
+
+```sh
+curl -s localhost:8080/topics
+curl -s localhost:8080/topics/orders/partitions/0 | python3 -m json.tool
+grpcurl -plaintext localhost:9092 list
+```
+
+### Environment
+
+| variable | default | |
+|---|---|---|
+| `PYKA_DATA_DIR` | `/var/lib/pyka` | a mounted volume in Kubernetes |
+| `PYKA_PARTITIONS` | `1` | for **new** topics only |
+| `PYKA_SEGMENT_BYTES` | 1 GiB | max 4 GiB — the index's u32 position |
+| `PYKA_SYNC_RECORDS` / `PYKA_SYNC_MILLIS` | unset | unset = never fsync explicitly |
+| `PYKA_PORT` / `PYKA_ADMIN_PORT` | 9092 / 8080 | |
+| `PYKA_BROKERS` | 1 | cluster size; ordinal comes from `$HOSTNAME` |
+| `PYKA_GRACE` | 30 | shutdown drain seconds |
+
 ## Dev
 
 ```sh
-uv sync          # create .venv with pytest
-uv run pytest    # run the tests
+uv sync                    # create the venv
+uv run pytest              # 379 tests
+./scripts/gen_proto.sh     # regenerate stubs after editing the .proto
+uv run python bench/bench_seek.py
 ```

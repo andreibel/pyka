@@ -11,15 +11,19 @@ import pytest
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
 from pyka.broker.server import SERVICE_NAME, BrokerServer
+from pyka.broker.store import Store
 from pyka.v1 import broker_pb2, broker_pb2_grpc
 
 
 @pytest.fixture
-async def server():
-    server = BrokerServer(port=0)
+async def server(tmp_path):
+    store = Store(tmp_path / "data")
+    await store.open()
+    server = BrokerServer(store, port=0)
     await server.start()
     yield server
     await server.stop(grace=0)
+    await store.close()
 
 
 @pytest.fixture
@@ -33,9 +37,9 @@ async def channel(server):
 # --------------------------------------------------------------------------
 
 
-async def test_the_server_binds_a_real_port():
+async def test_the_server_binds_a_real_port(tmp_path):
     # port=0 asks the OS for any free port; the server must report back which.
-    server = BrokerServer(port=0)
+    server = BrokerServer(Store(tmp_path / "data"), port=0)
     await server.start()
     assert server.port > 0
     assert server.address.endswith(str(server.port))
@@ -114,27 +118,13 @@ async def test_an_unknown_service_is_NOT_FOUND(channel):
 # --------------------------------------------------------------------------
 
 
-async def test_produce_is_unimplemented(channel):
-    stub = broker_pb2_grpc.BrokerStub(channel)
-    with pytest.raises(grpc.aio.AioRpcError) as err:
-        await stub.Produce(broker_pb2.ProduceRequest(topic="orders", value=b"hi"))
-    assert err.value.code() == grpc.StatusCode.UNIMPLEMENTED
-    assert "B2" in err.value.details()
-
-
 async def test_metadata_is_unimplemented(channel):
+    # Deferred to D4, where the Ring finally gets a caller.
     stub = broker_pb2_grpc.BrokerStub(channel)
     with pytest.raises(grpc.aio.AioRpcError) as err:
         await stub.Metadata(broker_pb2.MetadataRequest())
     assert err.value.code() == grpc.StatusCode.UNIMPLEMENTED
-
-
-async def test_produce_stream_is_unimplemented(channel):
-    stub = broker_pb2_grpc.BrokerStub(channel)
-    call = stub.ProduceStream(iter([broker_pb2.ProduceRequest(topic="orders")]))
-    with pytest.raises(grpc.aio.AioRpcError) as err:
-        await call.read()
-    assert err.value.code() == grpc.StatusCode.UNIMPLEMENTED
+    assert "D4" in err.value.details()
 
 
 async def test_consume_is_unimplemented(channel):

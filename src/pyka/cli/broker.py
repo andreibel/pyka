@@ -60,7 +60,9 @@ def _optional_int(name: str) -> int | None:
 
 async def serve() -> None:
     store = _store_from_env()
-    grpc_server = BrokerServer(port=int(os.environ.get("PYKA_PORT", DEFAULT_PORT)))
+    grpc_server = BrokerServer(
+        store, port=int(os.environ.get("PYKA_PORT", DEFAULT_PORT))
+    )
     await grpc_server.start()
 
     admin = uvicorn.Server(

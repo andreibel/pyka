@@ -21,6 +21,7 @@ from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
 
 from pyka.broker.handler import BrokerServicer
+from pyka.broker.store import Store
 from pyka.v1 import broker_pb2, broker_pb2_grpc
 
 log = logging.getLogger(__name__)
@@ -38,13 +39,17 @@ class BrokerServer:
     whether a rolling update loses data.
     """
 
-    def __init__(self, port: int = DEFAULT_PORT, host: str = "[::]") -> None:
+    def __init__(
+        self, store: Store, port: int = DEFAULT_PORT, host: str = "[::]"
+    ) -> None:
         self._host = host
         self._port = port
         self._server = grpc.aio.server()
         self._health = health.HealthServicer()
 
-        broker_pb2_grpc.add_BrokerServicer_to_server(BrokerServicer(), self._server)
+        broker_pb2_grpc.add_BrokerServicer_to_server(
+            BrokerServicer(store), self._server
+        )
         health_pb2_grpc.add_HealthServicer_to_server(self._health, self._server)
         reflection.enable_server_reflection(
             (SERVICE_NAME, health.SERVICE_NAME, reflection.SERVICE_NAME), self._server
