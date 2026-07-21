@@ -22,11 +22,24 @@ x-broker: &broker
   restart: unless-stopped
   environment: &broker-env
     PYKA_BROKERS: "3"
-    # Advertised to clients in a Metadata response. Container-internal names
-    # and the container port — a client running inside this network resolves
-    # them directly. A client on the host must go through the mapped ports
-    # instead, which is why demo.py targets localhost:909N.
-    PYKA_ADDRESS_TEMPLATE: "pyka-{ordinal}:9092"
+    # THE classic Kafka-on-Docker problem, and its answer.
+    #
+    # Metadata does not just say "partition 3 lives on broker 2" — it hands
+    # back an ADDRESS the client will dial. So the address has to be reachable
+    # from wherever the client is, and "inside the Docker network" and "on your
+    # laptop" are different places:
+    #
+    #   pyka-2:9092      resolves inside this network, NOT from the host
+    #   localhost:9092   resolves from the host, but inside a container it
+    #                    means that container itself
+    #
+    # There is no single string that is right for both, which is exactly why
+    # Kafka has `listeners` and `advertised.listeners` as separate settings,
+    # with several named listeners (INTERNAL/EXTERNAL) on different ports.
+    # We have one advertised address, so we pick one audience: the host, since
+    # that is where scripts/demo.py and examples/ run. The mapped host ports
+    # below are what these names resolve to.
+    PYKA_ADDRESS_TEMPLATE: "localhost:909{ordinal}"
     PYKA_PARTITIONS: "6"
     PYKA_SEGMENT_BYTES: "1048576"
     PYKA_LOG_LEVEL: INFO

@@ -23,14 +23,20 @@ WORKDIR /app
 # Dependencies first, project second. Dependencies change rarely and source
 # changes constantly, so this ordering means editing a .py file rebuilds one
 # small layer instead of reinstalling grpcio every time.
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project --no-editable
+# README.md and LICENSE are copied because pyproject declares them as the
+# readme and license-files; hatchling refuses to build a wheel without them.
+COPY pyproject.toml uv.lock README.md LICENSE ./
+# --extra broker: the broker's own dependencies (FastAPI, uvicorn, the gRPC
+# health and reflection services) are an OPTIONAL extra, so that installing
+# the client from PyPI does not drag a web framework along. An image that runs
+# the broker needs them, so it asks for them explicitly.
+RUN uv sync --frozen --no-dev --no-install-project --no-editable --extra broker
 
 COPY src/ ./src/
 # --no-editable matters: the default installs the project as a .pth pointing
 # back at /app/src, so a venv copied without the source tree imports nothing.
 # This builds a real wheel into site-packages, and the venv is self-contained.
-RUN uv sync --frozen --no-dev --no-editable
+RUN uv sync --frozen --no-dev --no-editable --extra broker
 
 # ---------------------------------------------------------------- runtime
 FROM python:3.13-slim AS runtime

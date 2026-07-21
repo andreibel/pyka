@@ -630,10 +630,26 @@ docker compose down -v
 **On ports** — a container publishes as many as it likes; all three brokers
 publish two. What cannot repeat is the *host* side. Each broker listens on
 9092/8080 inside **its own network namespace**, mapped to different host ports
-so your laptop can tell them apart; between containers they reach each other by
-service name on the container port, with no mapping involved. Kubernetes
-removes even that, since every pod gets its own IP. (`kubectl port-forward`
-does target one pod at a time — but you can run several at once.)
+so your laptop can tell them apart. Kubernetes removes even that, since every
+pod gets its own IP. (`kubectl port-forward` does target one pod at a time —
+but you can run several at once.)
+
+**On advertised addresses** — the classic Kafka-on-Docker trap. `Metadata`
+does not just say "partition 3 is on broker 2", it hands back an **address the
+client will dial**, so that address must be reachable from wherever the client
+runs:
+
+```
+pyka-2:9092       resolves inside the Docker network, NOT from the host
+localhost:9092    resolves from the host; inside a container it means itself
+```
+
+No single string is right for both, which is exactly why Kafka splits
+`listeners` from `advertised.listeners` and supports several named listeners.
+We have one advertised address, so `docker-compose.yml` picks the host —
+`PYKA_ADDRESS_TEMPLATE=localhost:909{ordinal}` — because that is where
+`scripts/demo.py` and `examples/` run. A client running *inside* the network
+would need the service names instead.
 
 ### Running a cluster
 
