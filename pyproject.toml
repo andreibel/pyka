@@ -1,15 +1,29 @@
 [project]
 name = "pyka"
 version = "0.1.0"
-description = "pyKA — a mini Kafka: append-only log storage + an asyncio broker, built to learn"
+description = "pyKA — a mini Kafka: append-only log storage + a gRPC broker, built to learn"
 requires-python = ">=3.12"
-dependencies = []
+# Layer 3 only. Layers 1-2 (storage, topic) import nothing from here.
+dependencies = [
+    "grpcio>=1.68",
+    "grpcio-health-checking>=1.68",
+    "grpcio-reflection>=1.68",
+    "protobuf>=5.28",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+]
 
 [project.scripts]
 pyka-broker = "pyka.cli.broker:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "coverage>=7.15.2"]
+dev = [
+    "pytest>=8",
+    "coverage>=7.15.2",
+    "pytest-asyncio>=0.24",
+    "grpcio-tools>=1.68",
+    "httpx>=0.28",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -20,3 +34,8 @@ packages = ["src/pyka"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"          # async test functions need no decorator
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+omit = ["src/pyka/v1/*"]       # generated protobuf stubs are not our code

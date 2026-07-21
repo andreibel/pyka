@@ -1,0 +1,112 @@
+// pyKA broker — the data plane.
+//
+// Control-plane operations (create topics, inspect segments, health, metrics)
+// live on the FastAPI side at :8080. This file is only what producers and
+// consumers need, which is why it is small.
+//
+// Versioned from the first line: a wire contract is the one thing that cannot
+// be refactored later, because other people's binaries depend on it.
+
+syntax = "proto3";
+
+package pyka.v1;
+
+service Broker {
+  // Where to send records for a topic. The routing table comes from the Ring;
+  // every broker returns the identical answer, so a client may ask any of them.
+  rpc Metadata(MetadataRequest) returns (MetadataResponse);
+
+  // One record, one round trip. Simple and slow; use ProduceStream for volume.
+  rpc Produce(ProduceRequest) returns (ProduceResponse);
+
+  // Bidirectional: responses may arrive out of order relative to requests,
+  // which is what lets a client keep many appends in flight at once.
+  rpc ProduceStream(stream ProduceRequest) returns (stream ProduceResponse);
+
+  // Records from an offset onward. With follow=true the stream never ends and
+  // new records arrive as they are appended — B4's live tail is this flag,
+  // not a separate RPC.
+  rpc Consume(ConsumeRequest) returns (stream Record);
+}
+
+// ---------------------------------------------------------------------------
+// records
+// ---------------------------------------------------------------------------
+
+message Record {
+  int64 offset = 1;
+  int64 timestamp = 2;  // epoch milliseconds
+
+  // `optional` gives protobuf field presence, so absent and present-but-empty
+  // are distinguishable — the same distinction the on-disk format draws with
+  // klen/vlen of -1 versus 0. The wire and the disk agree without either one
+  // imitating the other.
+  optional bytes key = 3;    // absent = no key: round-robin, not compactable
+  optional bytes value = 4;  // absent = TOMBSTONE: this key is deleted
+}
+
+// ---------------------------------------------------------------------------
+// produce
+// ---------------------------------------------------------------------------
+
+message ProduceRequest {
+  string topic = 1;
+  optional bytes key = 2;
+  optional bytes value = 3;
+  optional int64 timestamp = 4;  // absent = the broker stamps now
+
+  // Echoed back on the response. Only meaningful on ProduceStream, where
+  // replies are not required to arrive in request order.
+  optional int64 correlation_id = 5;
+}
+
+message ProduceResponse {
+  // Both, always: every partition numbers its records from zero, so an offset
+  // without its partition does not identify anything.
+  int32 partition = 1;
+  int64 offset = 2;
+  optional int64 correlation_id = 3;
+}
+
+// ---------------------------------------------------------------------------
+// consume
+// ---------------------------------------------------------------------------
+
+message ConsumeRequest {
+  string topic = 1;
+  int32 partition = 2;  // named by the caller — reads never route by key
+  int64 offset = 3;     // absolute; OUT_OF_RANGE if the log starts later
+
+  // false: end the stream at the last record currently written.
+  // true:  keep the stream open and deliver records as they are appended.
+  bool follow = 4;
+
+  // 0 = no limit. Ignored when follow is true.
+  int32 max_records = 5;
+}
+
+// ---------------------------------------------------------------------------
+// metadata
+// ---------------------------------------------------------------------------
+
+message MetadataRequest {
+  // Empty = every topic this broker knows about.
+  repeated string topics = 1;
+}
+
+message MetadataResponse {
+  repeated TopicMetadata topics = 1;
+  int32 broker_count = 2;
+  int32 broker_id = 3;  // which broker answered — its StatefulSet ordinal
+}
+
+message TopicMetadata {
+  string name = 1;
+  repeated PartitionMetadata partitions = 2;
+}
+
+message PartitionMetadata {
+  int32 partition = 1;
+  int32 broker = 2;      // ordinal of the owner
+  string address = 3;    // host:port to send to — per-pod DNS, not a Service
+}

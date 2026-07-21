@@ -46,3 +46,4 @@ default really does mean "a power cut can lose the tail". It is the right
 default for a learning project and the wrong one for real data; phase B's
 broker is where a deliberate choice belongs.
 """
+

@@ -29,9 +29,17 @@ one topic-partition, routed by key hash at layer 2 — but nothing below layer 2
 knows partitions exist. **gRPC + protobuf** for the broker — NOT Kafka's wire
 protocol. No UI beyond an optional Textual TUI, late.
 
-Dependencies: stdlib only for layers 1–2 (storage, topic). Layer 3 may use
-`grpcio` / `grpcio-tools` / `protobuf`; pytest is the only dev dependency;
-Textual may join for the TUI. Nothing else without asking.
+**Two servers, one process, one `Topic`.** gRPC on :9092 is the data plane
+(produce/consume); FastAPI on :8080 is the control plane (create topics,
+inspect segments, health, metrics). They must share a process: `Segment` holds
+an exclusive write handle, so two processes on one data directory would each
+think they own the tail.
+
+Dependencies: **stdlib only for layers 1–2** (storage, topic) — their tests
+import nothing else, and that is a property to preserve. Layer 3 may use
+`grpcio`, `grpcio-health-checking`, `grpcio-reflection`, `protobuf`, `fastapi`,
+`uvicorn`. Dev: `pytest`, `coverage`, `pytest-asyncio`, `grpcio-tools`,
+`httpx`. Textual may join for the TUI. Nothing else without asking.
 
 The roadmap with milestones lives in README.md — keep it checked off as
 milestones land, and keep it the single source of truth for "where are we."
