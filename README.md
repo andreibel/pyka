@@ -539,6 +539,41 @@ curl -s localhost:8080/topics/orders/partitions/0 | python3 -m json.tool
 grpcurl -plaintext localhost:9092 list
 ```
 
+### Docker
+
+```sh
+docker build -t pyka:dev .
+docker run --rm -p 9092:9092 -p 8080:8080 -v pyka-data:/var/lib/pyka pyka:dev
+```
+
+283 MB, runs as **uid 10001** (never root), and the runtime stage carries no
+`uv`, no compiler, and no source tree — only a self-contained virtualenv. Two
+details that are load-bearing rather than decorative:
+
+- **`CMD` is exec form.** Shell form makes `/bin/sh` PID 1, and `sh` does not
+  forward SIGTERM — the broker would never drain, and every stop would end in
+  SIGKILL with a torn segment tail. Measured: `docker stop` returns in ~470 ms.
+- **`uv sync --no-editable`.** The default installs the project as a `.pth`
+  pointing back at `/app/src`, so a venv copied without the source tree imports
+  nothing. This builds a real wheel into site-packages.
+
+A three-broker cluster:
+
+```sh
+docker compose up -d --build
+docker compose ps
+./scripts/demo.py create orders 6 && ./scripts/demo.py map orders
+docker compose down -v
+```
+
+**On ports** — a container publishes as many as it likes; all three brokers
+publish two. What cannot repeat is the *host* side. Each broker listens on
+9092/8080 inside **its own network namespace**, mapped to different host ports
+so your laptop can tell them apart; between containers they reach each other by
+service name on the container port, with no mapping involved. Kubernetes
+removes even that, since every pod gets its own IP. (`kubectl port-forward`
+does target one pod at a time — but you can run several at once.)
+
 ### Running a cluster
 
 ```sh

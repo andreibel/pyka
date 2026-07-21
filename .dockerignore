@@ -1,0 +1,22 @@
+# Everything the image does not need. Keeping this tight is not about disk —
+# it is about the build cache: any file copied in that changes often will
+# invalidate every layer after it.
+.git
+.gitignore
+.venv
+.pytest_cache
+.ruff_cache
+.coverage
+**/__pycache__
+**/*.pyc
+tests
+bench
+docs
+scripts
+k8s
+proto
+README.md
+CLAUDE.md
+Dockerfile
+.dockerignore
+docker-compose.yml

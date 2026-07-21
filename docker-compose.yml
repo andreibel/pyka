@@ -1,0 +1,92 @@
+# A three-broker pyKA cluster.
+#
+#   docker compose up -d --build
+#   docker compose ps
+#   docker compose down -v          # -v also drops the volumes
+#
+# On ports, since this is the usual confusion: a container can publish as many
+# as it likes — every broker here publishes two. What cannot repeat is the
+# HOST side. Each broker listens on 9092/8080 *inside its own network
+# namespace*, and those are mapped to different host ports so your laptop can
+# tell them apart. Between containers they reach each other by service name on
+# the container port, so no mapping is involved at all.
+#
+# Kubernetes removes even that: every pod gets its own IP, so all three brokers
+# use 9092 with nothing remapped. `kubectl port-forward` targets one pod at a
+# time — which is probably the limit you were remembering — but you can run
+# several at once, one per terminal.
+
+x-broker: &broker
+  build: .
+  image: pyka:dev
+  restart: unless-stopped
+  environment: &broker-env
+    PYKA_BROKERS: "3"
+    # Advertised to clients in a Metadata response. Container-internal names
+    # and the container port — a client running inside this network resolves
+    # them directly. A client on the host must go through the mapped ports
+    # instead, which is why demo.py targets localhost:909N.
+    PYKA_ADDRESS_TEMPLATE: "pyka-{ordinal}:9092"
+    PYKA_PARTITIONS: "6"
+    PYKA_SEGMENT_BYTES: "1048576"
+    PYKA_LOG_LEVEL: INFO
+  healthcheck:
+    test: ["CMD", "python", "-c",
+           "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=2).status == 200 else 1)"]
+    interval: 5s
+    timeout: 3s
+    retries: 5
+    start_period: 20s
+  # Room to drain live-tail streams and fsync before SIGKILL. The k8s
+  # equivalent is terminationGracePeriodSeconds.
+  stop_grace_period: 30s
+
+services:
+  pyka-0:
+    <<: *broker
+    # The hostname IS the identity: the broker reads its ordinal from it, the
+    # same way it will read a StatefulSet pod name.
+    hostname: pyka-0
+    container_name: pyka-0
+    environment:
+      <<: *broker-env
+      PYKA_DATA_DIR: /var/lib/pyka
+    ports:
+      - "9090:9092"   # host:container — the container side repeats freely
+      - "8080:8080"
+    volumes:
+      - pyka-0-data:/var/lib/pyka
+
+  pyka-1:
+    <<: *broker
+    hostname: pyka-1
+    container_name: pyka-1
+    environment:
+      <<: *broker-env
+      PYKA_DATA_DIR: /var/lib/pyka
+    ports:
+      - "9091:9092"
+      - "8081:8080"
+    volumes:
+      - pyka-1-data:/var/lib/pyka
+
+  pyka-2:
+    <<: *broker
+    hostname: pyka-2
+    container_name: pyka-2
+    environment:
+      <<: *broker-env
+      PYKA_DATA_DIR: /var/lib/pyka
+    ports:
+      - "9092:9092"
+      - "8082:8080"
+    volumes:
+      - pyka-2-data:/var/lib/pyka
+
+# Named volumes, not bind mounts: they survive `docker compose down` (only -v
+# removes them), which is the same promise a PersistentVolumeClaim makes when
+# a pod is deleted.
+volumes:
+  pyka-0-data:
+  pyka-1-data:
+  pyka-2-data:
