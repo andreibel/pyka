@@ -4,13 +4,22 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Self
 
-from pyka.storage.index import Index
+from pyka.storage.index import MAX_U32, Index
 from pyka.storage.record import CorruptRecord, Record
 from pyka.storage.types import Offset, Position
 
 
 class Segment:
     def __init__(self, base_path: Path, base_offset: Offset, max_bytes: int = 1 << 30) -> None:
+        # The index stores byte positions as u32, so a segment past 4 GiB
+        # cannot be indexed at all. Rejecting here turns a struct.error thrown
+        # from deep inside maybe_append, hours into a run, into a complaint at
+        # construction. Kafka's segment.bytes defaults to 1 GB for this reason.
+        if not 0 < max_bytes <= MAX_U32 + 1:
+            raise ValueError(
+                f"max_bytes must be between 1 and {MAX_U32 + 1} "
+                f"(the u32 limit of an index position), got {max_bytes}"
+            )
         self._base_offset = base_offset
         self._max_bytes = max_bytes
         self._log_path: Path = base_path / f'{base_offset:020d}.log'
@@ -165,9 +174,6 @@ class Segment:
         if self._position == 0:
             return True
         return self._position + record.size() <= self._max_bytes
-
-    def is_full(self) -> bool:
-        return self._position >= self._max_bytes
 
     def __enter__(self) -> Self:
         return self

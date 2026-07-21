@@ -237,16 +237,32 @@ class Topic:
     # ------------------------------------------------------------ lifecycle
 
     def sync(self) -> None:
-        for parts in self._open.values():
-            for entry in parts:
-                entry.log.sync()
-                entry.mark_synced()
+        for entry in self._every_partition():
+            entry.log.sync()
+            entry.mark_synced()
 
     def close(self) -> None:
-        for parts in self._open.values():
-            for entry in parts:
+        """Close every log, even if one of them fails.
+
+        This runs on SIGTERM — the moment when an unflushed tail costs most —
+        so one bad partition must not stop the other twenty from reaching disk.
+        Errors are collected and raised together rather than swallowed.
+        """
+        errors = []
+        for entry in self._every_partition():
+            try:
                 entry.log.close()  # closing already fsyncs
-        self._open.clear()
+            except Exception as err:  # noqa: BLE001 — re-raised below
+                errors.append(err)
+        with self._lock:
+            self._open.clear()
+        if errors:
+            raise ExceptionGroup(f"failed to close {self._root}", errors)
+
+    def _every_partition(self) -> list[_Partition]:
+        # Snapshot under the lock: create() may add topics while we iterate.
+        with self._lock:
+            return [entry for parts in self._open.values() for entry in parts]
 
     def __enter__(self) -> Self:
         return self

@@ -4,6 +4,7 @@ import struct
 import pytest
 
 from pyka.storage.record import CorruptRecord, Record
+from pyka.storage.types import Offset
 
 
 def a_record() -> Record:
@@ -108,3 +109,37 @@ def test_absurd_size_raises_before_allocating():
     struct.pack_into(">I", buf, 8, Record.MAX_SIZE + 1)
     with pytest.raises(CorruptRecord, match="MAX_SIZE"):
         Record.read_one(io.BytesIO(bytes(buf)))
+
+# --------------------------------------------------------------------------
+# the size limit — encode and read_one must be total inverses
+# --------------------------------------------------------------------------
+
+
+def test_a_record_over_max_size_cannot_be_encoded():
+    """Found by audit, not by a test.
+
+    read_one refuses any record claiming more than MAX_SIZE, so encoding one
+    produced bytes nothing could read back — and since recovery reads too, a
+    single oversized record made the whole segment unopenable. Silent, total,
+    unrecoverable data loss from one oversized value.
+    """
+    too_big = b"x" * (Record.MAX_SIZE + 1)
+    with pytest.raises(ValueError, match="over the .* limit"):
+        Record(Offset(0), 1, None, too_big).encode()
+
+
+def test_the_largest_encodable_record_still_round_trips():
+    # The boundary itself must work, or the limit is off by the header.
+    overhead = Record.HEADER_SIZE - Record.PREFIX_SIZE  # counted by `size`
+    value = b"x" * (Record.MAX_SIZE - overhead)
+    record = Record(Offset(0), 1, None, value)
+
+    buf = record.encode()
+    assert Record.decode(buf) == record
+    assert Record.read_one(io.BytesIO(buf)) == record
+
+
+def test_the_limit_counts_key_and_value_together():
+    half = (Record.MAX_SIZE // 2) + 100
+    with pytest.raises(ValueError, match="over the .* limit"):
+        Record(Offset(0), 1, b"k" * half, b"v" * half).encode()

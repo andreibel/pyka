@@ -320,3 +320,25 @@ def test_several_topics_are_independent(tmp_path):
     assert t.names() == ["clicks", "orders"]
     assert [r.value for r in t.read_from("orders", Offset(0))] == [b"one"]
     assert [r.value for r in t.read_from("clicks", Offset(0))] == [b"two"]
+
+
+def test_close_reaches_every_partition_even_if_one_fails(tmp_path):
+    """Shutdown runs on SIGTERM, when an unflushed tail costs most. Before the
+    fix, one failing log aborted the loop and left the rest without an fsync."""
+
+    class Boom:
+        def close(self):
+            raise OSError("disk gone")
+
+    t = topic(tmp_path, partitions=3)
+    t.append("orders", b"k", VALUE)
+    entries = t._open["orders"]
+    healthy = [e.log for e in entries[1:]]
+    entries[0].log = Boom()
+
+    with pytest.raises(ExceptionGroup) as err:
+        t.close()
+
+    assert "disk gone" in str(err.value.exceptions[0])
+    assert all(log._active._file.closed for log in healthy)
+    assert t._open == {}  # cache cleared regardless

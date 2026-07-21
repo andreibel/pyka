@@ -9,7 +9,7 @@ import struct
 
 import pytest
 
-from pyka.storage.index import ENTRY, ENTRY_SIZE, Index
+from pyka.storage.index import ENTRY, ENTRY_SIZE, MAX_U32, Index
 from pyka.storage.types import Offset, Position
 
 BASE = 417  # never 0 — catches code that forgets to subtract the base offset
@@ -216,3 +216,20 @@ def test_lookup_returns_the_true_floor_for_every_offset_in_range(tmp_path):
         floor = [p for p in pairs if p[0] <= offset]
         expected = floor[-1] if floor else (BASE, 0)
         assert ix.lookup(Offset(offset)) == expected, f"wrong floor for {offset}"
+
+
+def test_a_position_beyond_u32_is_rejected(tmp_path):
+    """Found by audit. The offset was checked, the position was not — so
+    struct.pack raised a bare struct.error from inside the index, about a
+    segment that had grown too big, with a message pointing nowhere near the
+    cause. Segment now refuses such a max_bytes up front; this is the
+    backstop."""
+    ix = idx(tmp_path)
+    with pytest.raises(ValueError, match="outside the u32"):
+        ix.maybe_append(Offset(BASE + 1), Position(MAX_U32 + 1))
+
+
+def test_the_largest_legal_position_is_accepted(tmp_path):
+    ix = idx(tmp_path)
+    ix.maybe_append(Offset(BASE + 1), Position(MAX_U32))
+    assert ix.last_entry() == (BASE + 1, MAX_U32)

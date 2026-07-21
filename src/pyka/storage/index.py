@@ -9,6 +9,11 @@ from pyka.storage.types import Offset, Position
 ENTRY = ">II"
 ENTRY_SIZE = struct.calcsize(ENTRY)
 
+MAX_U32 = 0xFFFFFFFF
+"""Both fields of an entry are u32, which caps a segment at 4 GiB and ~4
+billion records. Segment imports this rather than hard-coding 4 GiB: the
+entry format and the segment size limit are one decision, not two."""
+
 
 class Index:
 
@@ -42,10 +47,18 @@ class Index:
             return
 
         relative = offset - self._base_offset
-        if not 0 <= relative <= 0xFFFFFFFF:
+        if not 0 <= relative <= MAX_U32:
             raise ValueError(
                 f"offset {offset} is {relative} from base {self._base_offset}, "
                 f"outside the u32 an entry can hold"
+            )
+        # Position is u32 too. Unchecked, struct.pack raises a bare struct.error
+        # mid-append, from inside the index, about a segment that grew too big —
+        # an error message pointing nowhere near the cause.
+        if not 0 <= position <= MAX_U32:
+            raise ValueError(
+                f"position {position} is outside the u32 an entry can hold; "
+                f"a segment cannot exceed {MAX_U32 + 1} bytes"
             )
         if self._entries and relative <= self._entries[-1][0]:
             raise ValueError(

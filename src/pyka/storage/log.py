@@ -1,5 +1,6 @@
 """Log: one topic-partition — an ordered chain of Segments, only the tail writable."""
 import bisect
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -22,6 +23,16 @@ class Log:
     def __init__(self, directory: Path, max_segment_bytes: int = 1 << 30) -> None:
         self._directory = directory
         self._max_segment_bytes = max_segment_bytes
+        # Layer 3 dispatches every storage call through asyncio.to_thread, and
+        # two servers share one Topic — so several threads really do reach one
+        # Log at once. Without this, "read next_offset / write / advance" is a
+        # read-modify-write race: two appends claim the same offset, both write
+        # to the same byte position, and the segment is left with an offset gap
+        # that recovery refuses to open. Demonstrated, not theorised: 4 threads
+        # x 50 appends produced 2 usable records and a corrupt log.
+        #
+        # Reentrant because append() calls roll() and both need the lock.
+        self._lock = threading.RLock()
         # Log owns directory creation — a Segment silently mkdir-ing would put
         # log files in surprising places.
         directory.mkdir(parents=True, exist_ok=True)
@@ -72,20 +83,24 @@ class Log:
         a wrong offset is not rejected, it is unconstructible. (Segment.append
         still checks; that check now guards Log's own bookkeeping.)
         """
-        offset = self._active.next_offset
-        if timestamp is None:
-            timestamp = time.time_ns() // 1_000_000  # epoch ms, like Kafka
-        record = Record(offset, timestamp, key, value)
+        # The whole body is one critical section: claiming the offset, choosing
+        # the segment and writing the bytes must be indivisible, or two threads
+        # claim the same offset and write over each other.
+        with self._lock:
+            offset = self._active.next_offset
+            if timestamp is None:
+                timestamp = time.time_ns() // 1_000_000  # epoch ms, like Kafka
+            record = Record(offset, timestamp, key, value)
 
-        # Built before the roll check on purpose: has_room_for needs the
-        # record's size. The rolled-to segment starts empty, and an empty
-        # segment accepts anything — so this cannot roll twice, and the new
-        # base equals the next offset by construction (the chain invariant is
-        # maintained by the same line that rolls).
-        if not self._active.has_room_for(record):
-            self.roll()
-        self._active.append(record)
-        return offset
+            # Built before the roll check on purpose: has_room_for needs the
+            # record's size. The rolled-to segment starts empty, and an empty
+            # segment accepts anything — so this cannot roll twice, and the new
+            # base equals the next offset by construction (the chain invariant
+            # is maintained by the same line that rolls).
+            if not self._active.has_room_for(record):
+                self.roll()
+            self._active.append(record)
+            return offset
 
     def roll(self) -> Segment:
         """Seal the active segment and start a new one; returns the new tail.
@@ -104,20 +119,22 @@ class Log:
         path, and a chain listing segments that do not exist. An empty segment
         is already a fresh one; there is nothing to seal.
         """
-        if self._active.size_bytes == 0:
-            return self._active
+        with self._lock:
+            if self._active.size_bytes == 0:
+                return self._active
 
-        self._active.close()  # seal: write handles drop, reads keep working
-        self._segments.append(
-            Segment(self._directory, self.next_offset, self._max_segment_bytes)
-        )
-        return self._active
+            self._active.close()  # seal: write handles drop, reads keep working
+            self._segments.append(
+                Segment(self._directory, self.next_offset, self._max_segment_bytes)
+            )
+            return self._active
 
     @property
     def segments(self) -> tuple[Segment, ...]:
         """The chain, oldest first. A tuple so a caller cannot splice it —
         only append and roll may change which segments exist."""
-        return tuple(self._segments)
+        with self._lock:
+            return tuple(self._segments)
 
     def read_from(self, offset: Offset) -> Iterator[Record]:
         """Records from ``offset`` onward, crossing segment boundaries.
@@ -135,23 +152,46 @@ class Log:
         return self._iter_from(offset)
 
     def _iter_from(self, offset: Offset) -> Iterator[Record]:
+        # Snapshot under the lock: a concurrent roll appends to _segments, and
+        # iterating a list while another thread mutates it is how readers see
+        # a segment twice or not at all. The snapshot may go stale — a roll
+        # during a long read is invisible to it — which is fine: those records
+        # did not exist when the read started.
+        with self._lock:
+            segments = tuple(self._segments)
+
         # The same floor-search as Index.lookup, one level up: the segment
         # that can contain `offset` is the last one whose base is <= it.
         # From the next segment on, scan from each segment's own base —
         # passing the original offset would trip their below-base check,
         # which is doing its job: within those segments it IS out of range.
-        bases = [seg.base_offset for seg in self._segments]
+        bases = [seg.base_offset for seg in segments]
         start = bisect.bisect_right(bases, offset) - 1
-        for seg in self._segments[start:]:
+        for seg in segments[start:]:
             yield from seg.read_from(Offset(max(offset, seg.base_offset)))
 
     def sync(self) -> None:
         # Sealed segments were synced by close(); only the tail ever moves.
-        self._active.sync()
+        # Locked so a concurrent roll cannot swap the tail mid-fsync.
+        with self._lock:
+            self._active.sync()
 
     def close(self) -> None:
-        for seg in self._segments:
-            seg.close()  # idempotent — the sealed ones are already closed
+        """Close every segment, even if one of them fails.
+
+        A single failing close must not leave the rest unflushed: this runs on
+        SIGTERM, which is exactly when losing a tail matters most. Errors are
+        collected and raised together at the end, so nothing is hidden either.
+        """
+        with self._lock:
+            errors = []
+            for seg in self._segments:
+                try:
+                    seg.close()  # idempotent — sealed ones are already closed
+                except Exception as err:  # noqa: BLE001 — re-raised below
+                    errors.append(err)
+            if errors:
+                raise ExceptionGroup(f"failed to close {self._directory}", errors)
 
     def __enter__(self) -> Self:
         return self

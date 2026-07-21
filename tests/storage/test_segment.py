@@ -387,15 +387,6 @@ def test_max_bytes_is_a_soft_limit(tmp_path):
     assert s._position <= 2 * REC_SIZE + REC_SIZE - 1
 
 
-def test_is_full_tracks_the_threshold(tmp_path):
-    s = Segment(tmp_path, BASE, max_bytes=2 * REC_SIZE)
-    assert not s.is_full()
-    s.append(rec(BASE))
-    assert not s.is_full()
-    s.append(rec(BASE + 1))
-    assert s.is_full()
-
-
 def test_has_room_survives_a_reopen(tmp_path):
     s = Segment(tmp_path, BASE, max_bytes=2 * REC_SIZE)
     s.append(rec(BASE))

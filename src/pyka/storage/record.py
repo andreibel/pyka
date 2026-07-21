@@ -65,6 +65,16 @@ class Record:
         crc_pack = struct.pack(">I", crc)
 
         size = 4 + struct.calcsize(self.CRC_BODY) + len(key_bytes) + len(value_bytes)
+        # read_one refuses any record claiming more than MAX_SIZE, so encoding
+        # one would produce bytes nothing can ever read back — and because
+        # recovery reads too, a single oversized record makes the whole segment
+        # unopenable. Refusing here keeps encode and decode total inverses:
+        # anything this method emits, read_one accepts.
+        if size > self.MAX_SIZE:
+            raise ValueError(
+                f"record is {size} bytes, over the {self.MAX_SIZE} limit "
+                f"(key={len(key_bytes)}, value={len(value_bytes)})"
+            )
         return struct.pack(self.PREFIX, self.offset, size) + crc_pack + crc_body + key_bytes + value_bytes
 
     def size(self) -> int:
