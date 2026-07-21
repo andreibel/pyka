@@ -9,7 +9,7 @@ import pytest
 
 from pyka.storage.types import Offset
 from pyka.topic.policy import SYNC_EVERY_RECORD, SyncPolicy
-from pyka.topic.topic import Topic, UnknownTopic, validate_name
+from pyka.topic.topic import META_FILE, Topic, UnknownTopic, validate_name
 
 VALUE = b"v" * 20
 
@@ -76,8 +76,19 @@ def test_create_makes_a_directory_per_partition(tmp_path):
     t = topic(tmp_path, partitions=3)
     assert t.create("orders") == 3
     assert sorted(p.name for p in (tmp_path / "data" / "orders").iterdir()) == [
-        "0", "1", "2",
+        "0", "1", "2", META_FILE,
     ]
+
+
+def test_create_records_the_partition_count_on_disk(tmp_path):
+    """The count cannot be derived from local directories once partitions are
+    shared out — an instance holding 2 of 6 would compute `% 2` and route
+    every key wrongly. So it is written down."""
+    import json
+
+    topic(tmp_path, partitions=6).create("orders")
+    meta = json.loads((tmp_path / "data" / "orders" / META_FILE).read_text())
+    assert meta == {"partitions": 6}
 
 
 def test_create_is_idempotent(tmp_path):
@@ -227,14 +238,14 @@ def test_sync_never_leaves_the_bytes_unsynced(tmp_path):
     # data. This only pins that Topic did not call fsync behind our back.
     t = topic(tmp_path, sync_policy=SyncPolicy())
     t.append("orders", b"k", VALUE)
-    assert t._open["orders"][0].appends == 1  # counter never reset
+    assert t._open["orders"].local[0].appends == 1  # counter never reset
 
 
 def test_sync_every_record_resets_the_counter(tmp_path):
     t = topic(tmp_path, sync_policy=SYNC_EVERY_RECORD)
     for _ in range(3):
         t.append("orders", b"k", VALUE)
-    assert t._open["orders"][0].appends == 0
+    assert t._open["orders"].local[0].appends == 0
 
 
 def test_the_record_threshold_fires_on_schedule(tmp_path):
@@ -242,7 +253,7 @@ def test_the_record_threshold_fires_on_schedule(tmp_path):
     counts = []
     for _ in range(7):
         t.append("orders", b"k", VALUE)
-        counts.append(t._open["orders"][0].appends)
+        counts.append(t._open["orders"].local[0].appends)
     assert counts == [1, 2, 0, 1, 2, 0, 1]
 
 
@@ -250,7 +261,7 @@ def test_sync_counters_are_per_partition(tmp_path):
     # One frozen policy shared by all; the counters must not be.
     t = topic(tmp_path, partitions=4, sync_policy=SyncPolicy(records=100))
     t.append("orders", b"user-1", VALUE)
-    appends = [p.appends for p in t._open["orders"]]
+    appends = [p.appends for p in t._open["orders"].local.values()]
     assert sorted(appends) == [0, 0, 0, 1]
 
 
@@ -259,7 +270,7 @@ def test_explicit_sync_resets_every_partition(tmp_path):
     for n in range(6):
         t.append("orders", f"k{n}".encode(), VALUE)
     t.sync()
-    assert all(p.appends == 0 for p in t._open["orders"])
+    assert all(p.appends == 0 for p in t._open["orders"].local.values())
 
 
 # --------------------------------------------------------------------------
@@ -332,7 +343,7 @@ def test_close_reaches_every_partition_even_if_one_fails(tmp_path):
 
     t = topic(tmp_path, partitions=3)
     t.append("orders", b"k", VALUE)
-    entries = t._open["orders"]
+    entries = list(t._open["orders"].local.values())
     healthy = [e.log for e in entries[1:]]
     entries[0].log = Boom()
 

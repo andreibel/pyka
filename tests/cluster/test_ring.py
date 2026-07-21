@@ -130,9 +130,11 @@ def test_address_is_the_per_pod_dns_name():
     assert Ring(brokers=3, me=0).address_of(1) == "pyka-1.pyka-hl:9092"
 
 
-def test_the_host_template_and_port_are_configurable():
-    ring = Ring(brokers=2, me=0, host_template="broker{ordinal}.svc", port=7000)
-    assert ring.address_of(1) == "broker1.svc:7000"
+def test_the_address_template_is_configurable():
+    # One template with the port in it, so brokers can differ by port —
+    # which is how several run on one machine.
+    ring = Ring(brokers=2, me=0, address_template="localhost:909{ordinal}")
+    assert ring.address_of(1) == "localhost:9091"
 
 
 def test_the_routing_table_maps_partitions_to_addresses():
@@ -164,11 +166,10 @@ def test_from_env_defaults_to_a_cluster_of_one(monkeypatch):
     assert Ring.from_env() == Ring(brokers=1, me=0)
 
 
-def test_from_env_honours_template_and_port(monkeypatch):
+def test_from_env_honours_the_address_template(monkeypatch):
     monkeypatch.setenv("HOSTNAME", "kafka-1")
     monkeypatch.setenv("PYKA_BROKERS", "2")
-    monkeypatch.setenv("PYKA_HOST_TEMPLATE", "kafka-{ordinal}.internal")
-    monkeypatch.setenv("PYKA_PORT", "9000")
+    monkeypatch.setenv("PYKA_ADDRESS_TEMPLATE", "kafka-{ordinal}.internal:9000")
     assert Ring.from_env().address_of(1) == "kafka-1.internal:9000"
 
 

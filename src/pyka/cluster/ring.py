@@ -33,8 +33,15 @@ class Ring:
 
     brokers: int
     me: int
-    host_template: str = "pyka-{ordinal}.pyka-hl"
-    port: int = 9092
+
+    address_template: str = "pyka-{ordinal}.pyka-hl:9092"
+    """host:port of broker N — one template, port included.
+
+    Brokers differ by port as well as host: in Kubernetes they share a port
+    and differ by hostname (``pyka-1.pyka-hl:9092``), while several on one
+    laptop share a host and differ by port (``localhost:909{ordinal}``). A
+    separate host and port field could not express the second.
+    """
 
     def __post_init__(self) -> None:
         if self.brokers < 1:
@@ -82,7 +89,7 @@ class Ring:
         """
         if not 0 <= broker < self.brokers:
             raise ValueError(f"no broker {broker} in a {self.brokers}-broker cluster")
-        return f"{self.host_template.format(ordinal=broker)}:{self.port}"
+        return self.address_template.format(ordinal=broker)
 
     def routing_table(self, partitions: int) -> dict[int, str]:
         """partition -> address, the body of a metadata response.
@@ -112,6 +119,7 @@ class Ring:
         return cls(
             brokers=int(os.environ.get("PYKA_BROKERS", "1")),
             me=int(ordinal),
-            host_template=os.environ.get("PYKA_HOST_TEMPLATE", "pyka-{ordinal}.pyka-hl"),
-            port=int(os.environ.get("PYKA_PORT", "9092")),
+            address_template=os.environ.get(
+                "PYKA_ADDRESS_TEMPLATE", "pyka-{ordinal}.pyka-hl:9092"
+            ),
         )

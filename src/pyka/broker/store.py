@@ -35,8 +35,17 @@ class Store:
         max_segment_bytes: int = 1 << 30,
         ring: Ring | None = None,
     ) -> None:
-        self._topic = Topic(root, partitions, sync_policy, max_segment_bytes)
         self._ring = ring or Ring(brokers=1, me=0)
+        # The ring reaches layer 2 as a bare predicate, never as a Ring: the
+        # topic layer decides where a key goes, but has no idea that machines
+        # exist. With one broker `owns` is always True and nothing changes.
+        self._topic = Topic(
+            root,
+            partitions,
+            sync_policy,
+            max_segment_bytes,
+            owns=self._ring.owns,
+        )
         self._tail = Tail()
         self._ready = False
 
@@ -90,15 +99,27 @@ class Store:
     async def create(self, name: str, partitions: int | None = None) -> int:
         return await asyncio.to_thread(self._topic.create, name, partitions)
 
+    async def partitions_of(self, name: str) -> int:
+        return await asyncio.to_thread(self._topic.partitions_of, name)
+
+    async def local_partitions(self, name: str) -> list[int]:
+        return await asyncio.to_thread(self._topic.local_partitions, name)
+
+    async def route(self, name: str, key: bytes | None) -> int:
+        """Where a key belongs — asked before appending, so a broker that does
+        not own the answer can redirect instead of writing."""
+        return await asyncio.to_thread(self._topic.route, name, key)
+
     async def append(
         self,
         name: str,
         key: bytes | None,
         value: bytes | None,
         timestamp: int | None = None,
+        partition: int | None = None,
     ) -> tuple[int, Offset]:
         partition, offset = await asyncio.to_thread(
-            self._topic.append, name, key, value, timestamp
+            self._topic.append, name, key, value, timestamp, partition
         )
         # After the await, so back on the event loop — which is what makes a
         # plain asyncio.Event safe. Every append must come through here or a

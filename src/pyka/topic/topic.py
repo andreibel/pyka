@@ -1,8 +1,9 @@
 """Topic: named logs on disk — validation, routing, and when to fsync."""
+import json
 import string
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Self
@@ -19,6 +20,20 @@ from pyka.topic.policy import SYNC_NEVER, SyncPolicy
 _ALLOWED_NAME_CHARS = frozenset(string.ascii_letters + string.digits + "._-")
 _MAX_NAME_LENGTH = 200
 
+META_FILE = "topic.json"
+"""Topic-level metadata: how many partitions the topic has, in TOTAL.
+
+Load-bearing the moment partitions are spread across brokers. This instance
+stores only the partitions it owns, so counting local directories would answer
+2 for a 6-partition topic — and the partitioner would then compute
+`crc32(key) % 2` and send every key to the wrong place.
+
+The total cannot be derived from local disk, so it is written down. This is
+the smallest possible piece of cluster metadata, and it is exactly why real
+systems centralise theirs: every broker keeps a copy, and they agree only
+because they were told the same number.
+"""
+
 
 class UnknownTopic(KeyError):
     """Asked for a topic that does not exist.
@@ -26,6 +41,16 @@ class UnknownTopic(KeyError):
     Reads raise this; appends create instead. A consumer naming a topic that
     isn't there has almost certainly typo'd, and silently returning zero
     records from a freshly conjured empty topic would never tell it so.
+    """
+
+
+class PartitionNotLocal(KeyError):
+    """The partition exists, but this instance does not store it.
+
+    Different from a partition that does not exist: the caller is not wrong
+    about the topic, it is talking to the wrong holder. Layer 3 turns this
+    into "try broker N at this address"; the wording here stays generic
+    because layer 2 has never heard of brokers.
     """
 
 
@@ -78,18 +103,30 @@ class _Partition:
         self.synced_at = time.monotonic()
 
 
+@dataclass
+class _OpenTopic:
+    """A topic as this instance sees it: the whole, and its own share."""
+
+    partitions: int               # total, across every holder
+    local: dict[int, _Partition]  # only the ones stored here
+
+
 class Topic:
     """A directory of topics, each a directory of partitions, each a Log.
 
-        root/orders/0/00000000000000000000.log + .index
-        root/orders/1/...
+        root/orders/topic.json      {"partitions": 6}
+        root/orders/0/00000...log + .index
+        root/orders/3/...           only the partitions THIS instance owns
         root/clicks/0/...
 
     Partitions are nested rather than flat (Kafka writes ``orders-0/``) so
-    listing topic names is an ``iterdir`` instead of parsing and de-duplicating
-    suffixes. A topic's partition count is a property of the topic recorded on
-    disk, NOT of this registry: reopening a 4-partition topic finds 4, whatever
-    ``partitions`` says here.
+    listing topic names is an ``iterdir`` instead of parsing and
+    de-duplicating suffixes.
+
+    ``owns`` decides which partitions live here, and defaults to all of them —
+    the single-node case, and the only one anything below layer 3 has ever
+    needed. Layer 3 passes ``ring.owns``, as a plain predicate, so this module
+    still knows nothing about brokers or clusters.
     """
 
     def __init__(
@@ -98,6 +135,7 @@ class Topic:
         partitions: int = 1,
         sync_policy: SyncPolicy = SYNC_NEVER,
         max_segment_bytes: int = 1 << 30,
+        owns: Callable[[int], bool] | None = None,
     ) -> None:
         if partitions < 1:
             raise ValueError(f"partitions must be >= 1, got {partitions}")
@@ -105,18 +143,19 @@ class Topic:
         self._default_partitions = partitions
         self._sync_policy = sync_policy
         self._max_segment_bytes = max_segment_bytes
+        self._owns = owns if owns is not None else (lambda _partition: True)
         self._partitioner = Partitioner()
-        self._open: dict[str, list[_Partition]] = {}
+        self._open: dict[str, _OpenTopic] = {}
         # Layer 3 reaches this object from two servers (gRPC and the admin
         # API), each dispatching blocking calls through asyncio.to_thread — so
         # several threads really can call create() for the same name at once.
         # Without this, both would win the "not in cache" check and build two
         # Log objects on one directory, each holding its own write handle.
-        # Reentrant because append() and _partitions() both call create().
+        # Reentrant because append() and _topic() both call _open_locked().
         #
         # Scope is deliberately the CACHE, not the whole class: appends to
-        # different topics must not serialise. The per-log lock that makes
-        # concurrent appends safe belongs in Log.append and lands with B2.
+        # different topics must not serialise. Concurrent appends to ONE log
+        # are made safe by Log.append's own lock.
         self._lock = threading.RLock()
         root.mkdir(parents=True, exist_ok=True)
 
@@ -129,27 +168,32 @@ class Topic:
         directory does. Otherwise a fresh restart would report none until
         something happened to touch them.
 
-        A topic is a directory *containing partitions* — a structural test,
+        A topic is a directory holding a ``topic.json`` — a structural test,
         not a lexical one. The data root is not always ours alone: a freshly
         formatted ext4 volume (every cloud PersistentVolumeClaim) arrives with
-        a ``lost+found``, and NFS volumes grow a ``.snapshot``. The second of
-        those is a perfectly legal topic name, so checking the name is not
-        enough — but neither directory holds partitions, and listing a name
-        that ``get()`` then rejects with UnknownTopic would make the API
-        disagree with itself.
+        a ``lost+found``, and NFS volumes grow a ``.snapshot``; the second is a
+        perfectly legal topic name, so filtering by name is not enough. The
+        metadata file is also the only marker that works for an instance
+        holding *none* of a topic's partitions — no partition directory, but
+        the topic still exists.
         """
         return sorted(
             p.name
             for p in self._root.iterdir()
-            if p.is_dir() and _is_valid_name(p.name) and self._partition_dirs(p.name)
+            if p.is_dir() and _is_valid_name(p.name) and (p / META_FILE).is_file()
         )
 
     def exists(self, name: str) -> bool:
         validate_name(name)
-        return (self._root / name).is_dir()
+        return (self._root / name / META_FILE).is_file()
 
     def partitions_of(self, name: str) -> int:
-        return len(self._partitions(name))
+        """Total partitions in this topic, across every holder."""
+        return self._topic(name).partitions
+
+    def local_partitions(self, name: str) -> list[int]:
+        """The subset stored here — all of them unless ``owns`` says otherwise."""
+        return sorted(self._topic(name).local)
 
     # ------------------------------------------------------- create and get
 
@@ -163,29 +207,43 @@ class Topic:
         validate_name(name)
         with self._lock:
             if name in self._open:
-                return len(self._open[name])
-            return self._open_locked(name, partitions)
+                return self._open[name].partitions
+            return self._open_locked(name, partitions).partitions
 
-    def _open_locked(self, name: str, partitions: int | None) -> int:
-        existing = self._partition_dirs(name)
-        count = len(existing) or (partitions or self._default_partitions)
-        self._open[name] = [
-            _Partition(Log(self._root / name / str(p), self._max_segment_bytes))
-            for p in range(count)
-        ]
-        return count
+    def _open_locked(self, name: str, partitions: int | None) -> _OpenTopic:
+        count = self._read_meta(name)
+        if count is None:
+            count = partitions or self._default_partitions
+            self._write_meta(name, count)
+
+        opened = _OpenTopic(
+            partitions=count,
+            local={
+                p: _Partition(Log(self._root / name / str(p), self._max_segment_bytes))
+                for p in range(count)
+                if self._owns(p)
+            },
+        )
+        self._open[name] = opened
+        return opened
 
     def get(self, name: str, partition: int = 0) -> Log:
         """The Log for one partition. Raises rather than creating — see
         UnknownTopic."""
-        parts = self._partitions(name)
-        if not 0 <= partition < len(parts):
-            raise ValueError(
-                f"topic {name!r} has {len(parts)} partition(s), asked for {partition}"
-            )
-        return parts[partition].log
+        topic = self._topic(name)
+        self._check_partition(name, topic, partition)
+        return topic.local[partition].log
 
     # -------------------------------------------------------- read and write
+
+    def route(self, name: str, key: bytes | None) -> int:
+        """Which partition this key belongs to. Creates nothing.
+
+        Exposed so a caller can find out where a record *should* go before
+        discovering it cannot accept it — a holder that does not own the
+        answer must redirect rather than write.
+        """
+        return self._partitioner.partition_for(key, self._topic(name).partitions)
 
     def append(
         self,
@@ -193,11 +251,16 @@ class Topic:
         key: bytes | None,
         value: bytes | None,
         timestamp: int | None = None,
+        partition: int | None = None,
     ) -> tuple[int, Offset]:
         """Route (key, value) to a partition, append it, maybe fsync.
 
         Returns (partition, offset) — the offset alone is meaningless without
         the partition, since each one numbers its records from zero.
+
+        ``partition`` overrides routing, for a caller that has already routed.
+        Either way the answer must be a partition stored here, or
+        PartitionNotLocal.
 
         Auto-creates the topic: a producer writing to a new name is the normal
         way topics come into existence (Kafka's auto.create.topics.enable).
@@ -205,14 +268,17 @@ class Topic:
         validate_name(name)
         with self._lock:
             # Only the cache lookup is guarded. The append itself is outside
-            # the lock so two topics never block each other; making concurrent
-            # appends to ONE log safe is Log.append's job (B2).
+            # the lock so two topics never block each other; concurrent
+            # appends to ONE log are Log.append's problem.
             if name not in self._open:
                 self._open_locked(name, None)
-            parts = self._open[name]
+            topic = self._open[name]
 
-        partition = self._partitioner.partition_for(key, len(parts))
-        entry = parts[partition]
+        if partition is None:
+            partition = self._partitioner.partition_for(key, topic.partitions)
+        self._check_partition(name, topic, partition)
+
+        entry = topic.local[partition]
         offset = entry.log.append(key, value, timestamp)
 
         # Durability is decided HERE, not in storage: Log.sync() is the
@@ -262,7 +328,11 @@ class Topic:
     def _every_partition(self) -> list[_Partition]:
         # Snapshot under the lock: create() may add topics while we iterate.
         with self._lock:
-            return [entry for parts in self._open.values() for entry in parts]
+            return [
+                entry
+                for topic in self._open.values()
+                for entry in topic.local.values()
+            ]
 
     def __enter__(self) -> Self:
         return self
@@ -272,19 +342,43 @@ class Topic:
 
     # -------------------------------------------------------------- private
 
-    def _partition_dirs(self, name: str) -> list[int]:
-        directory = self._root / name
-        if not directory.is_dir():
-            return []
-        return sorted(int(p.name) for p in directory.iterdir() if p.name.isdigit())
+    def _check_partition(self, name: str, topic: _OpenTopic, partition: int) -> None:
+        """Two different wrongs, deliberately two different errors.
 
-    def _partitions(self, name: str) -> list[_Partition]:
-        """Open partitions for an EXISTING topic, or raise."""
+        Out of range means the caller is confused about the topic; not local
+        means the caller is confused about *who holds it*, which is a
+        recoverable mistake — refresh your routing and try elsewhere.
+        """
+        if not 0 <= partition < topic.partitions:
+            raise ValueError(
+                f"topic {name!r} has {topic.partitions} partition(s), "
+                f"asked for {partition}"
+            )
+        if partition not in topic.local:
+            raise PartitionNotLocal(
+                f"partition {partition} of {name!r} is not stored here"
+            )
+
+    def _meta_path(self, name: str) -> Path:
+        return self._root / name / META_FILE
+
+    def _read_meta(self, name: str) -> int | None:
+        path = self._meta_path(name)
+        if not path.is_file():
+            return None
+        return int(json.loads(path.read_text())["partitions"])
+
+    def _write_meta(self, name: str, partitions: int) -> None:
+        path = self._meta_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"partitions": partitions}))
+
+    def _topic(self, name: str) -> _OpenTopic:
+        """An EXISTING topic, opened here if it was not already, or raise."""
         validate_name(name)
         with self._lock:
             if name in self._open:
                 return self._open[name]
-            if not self._partition_dirs(name):
+            if self._read_meta(name) is None:
                 raise UnknownTopic(name)
-            self._open_locked(name, None)  # adopts the count from disk
-            return self._open[name]
+            return self._open_locked(name, None)

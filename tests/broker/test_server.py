@@ -118,13 +118,12 @@ async def test_an_unknown_service_is_NOT_FOUND(channel):
 # --------------------------------------------------------------------------
 
 
-async def test_metadata_is_unimplemented(channel):
-    # Deferred to D4, where the Ring finally gets a caller.
+async def test_metadata_on_an_empty_broker_reports_the_cluster(channel):
+    # No topics yet, but the cluster shape is still knowable.
     stub = broker_pb2_grpc.BrokerStub(channel)
-    with pytest.raises(grpc.aio.AioRpcError) as err:
-        await stub.Metadata(broker_pb2.MetadataRequest())
-    assert err.value.code() == grpc.StatusCode.UNIMPLEMENTED
-    assert "D4" in err.value.details()
+    response = await stub.Metadata(broker_pb2.MetadataRequest())
+    assert (response.broker_count, response.broker_id) == (1, 0)
+    assert list(response.topics) == []
 
 
 async def test_consume_of_an_unknown_topic_is_not_found(channel):

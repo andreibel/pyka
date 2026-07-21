@@ -58,6 +58,18 @@ message ProduceRequest {
   // Echoed back on the response. Only meaningful on ProduceStream, where
   // replies are not required to arrive in request order.
   optional int64 correlation_id = 5;
+
+  // Absent = "broker, you route this" — correct and convenient on a
+  // single-broker cluster, where every partition is local.
+  //
+  // Present = "I already routed this; verify you own it". This is what a
+  // client must send once there is more than one broker, because it has to
+  // know which broker to open a socket to, and it can only know that after
+  // it knows the partition.
+  //
+  // Either way the broker checks ownership and answers FAILED_PRECONDITION,
+  // naming the right broker, when the partition is not its own.
+  optional int32 partition = 6;
 }
 
 message ProduceResponse {

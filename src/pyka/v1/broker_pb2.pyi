@@ -19,18 +19,20 @@ class Record(_message.Message):
     def __init__(self, offset: _Optional[int] = ..., timestamp: _Optional[int] = ..., key: _Optional[bytes] = ..., value: _Optional[bytes] = ...) -> None: ...
 
 class ProduceRequest(_message.Message):
-    __slots__ = ("topic", "key", "value", "timestamp", "correlation_id")
+    __slots__ = ("topic", "key", "value", "timestamp", "correlation_id", "partition")
     TOPIC_FIELD_NUMBER: _ClassVar[int]
     KEY_FIELD_NUMBER: _ClassVar[int]
     VALUE_FIELD_NUMBER: _ClassVar[int]
     TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
     CORRELATION_ID_FIELD_NUMBER: _ClassVar[int]
+    PARTITION_FIELD_NUMBER: _ClassVar[int]
     topic: str
     key: bytes
     value: bytes
     timestamp: int
     correlation_id: int
-    def __init__(self, topic: _Optional[str] = ..., key: _Optional[bytes] = ..., value: _Optional[bytes] = ..., timestamp: _Optional[int] = ..., correlation_id: _Optional[int] = ...) -> None: ...
+    partition: int
+    def __init__(self, topic: _Optional[str] = ..., key: _Optional[bytes] = ..., value: _Optional[bytes] = ..., timestamp: _Optional[int] = ..., correlation_id: _Optional[int] = ..., partition: _Optional[int] = ...) -> None: ...
 
 class ProduceResponse(_message.Message):
     __slots__ = ("partition", "offset", "correlation_id")
