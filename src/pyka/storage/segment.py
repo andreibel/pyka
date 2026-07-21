@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Self
 
+from pyka.storage.index import Index
 from pyka.storage.record import CorruptRecord, Record
 from pyka.storage.types import Offset, Position
 
@@ -13,8 +14,9 @@ class Segment:
         self._base_offset = base_offset
         self._max_bytes = max_bytes
         self._log_path: Path = base_path / f'{base_offset:020d}.log'
-        # written in A3; the sparse offset -> position map lives beside the log
-        self._index_path = base_path / f'{base_offset:020d}.index'
+        # the sparse offset -> position map living beside the log; must exist
+        # before _recover(), which rebuilds it while scanning
+        self._index = Index(base_path / f'{base_offset:020d}.index', base_offset)
         self._next_offset, self._position = self._recover()
         self._file = open(self._log_path, "ab")
 
@@ -24,11 +26,13 @@ class Segment:
         Truncates a torn tail: without it the next append would land *after*
         the garbage and embed an unreadable hole in the middle of the file.
 
-        Runs a full scan every open. The .index will later give a starting
-        point so only the tail needs scanning — this same loop becomes
-        Index.rebuild().
+        Also rebuilds the index from scratch: whatever the .index file held is
+        discarded and regenerated from the log — the log is the only authority.
+        Still a full scan every open; seeding the scan from the index's last
+        entry is a later, separately measured optimization.
         """
         self._log_path.touch(exist_ok=True)
+        self._index.clear()
 
         next_offset, position = self._base_offset, Position(0)
         with open(self._log_path, "rb") as f:
@@ -41,6 +45,11 @@ class Segment:
                         f"offset gap at byte {position} in {self._log_path.name}: "
                         f"expected {next_offset}, got {rec.offset}"
                     )
+                # read_one advanced the FILE position, but `position` still
+                # holds where this record STARTED — which is what the index
+                # stores. One line later it becomes this record's end, and
+                # feeding that would index every record at its successor.
+                self._index.maybe_append(rec.offset, position)
                 next_offset = Offset(rec.offset + 1)
                 position = Position(f.tell())
 
@@ -66,17 +75,22 @@ class Segment:
             )
         self._next_offset = Offset(self._next_offset + 1)
         self._position = Position(end)
+        self._index.maybe_append(record.offset, position)
         return position
 
     def sync(self) -> None:
+        # Log first, index second. An index made durable ahead of its log can
+        # point past the end of the file; a stale index merely rebuilds.
         self._file.flush()
         os.fsync(self._file.fileno())
+        self._index.sync()
 
     def close(self) -> None:
         if self._file.closed:
             return
         self.sync()
         self._file.close()
+        self._index.close()
 
     def read_from(self, offset: Offset) -> Iterator[Record]:
         """Records from ``offset`` onward. Validates eagerly — see _iter_from."""
@@ -87,13 +101,29 @@ class Segment:
     def _iter_from(self, offset: Offset) -> Iterator[Record]:
         # Split from read_from so the bounds check runs at call time: a function
         # containing `yield` executes nothing until the first next().
-        #
-        # Scans from byte 0, decoding every record before the one asked for.
-        # Index.lookup(offset) will supply a starting position in A3.
+        hint_offset, position = self._index.lookup(offset)
         with open(self._log_path, "rb") as f:
-            while (rec := Record.read_one(f)) is not None:
+            f.seek(position)
+            # The hint is verified, never trusted: the first record after the
+            # seek must carry exactly the offset the index promised. Anything
+            # else — wrong offset, EOF past the data, or bytes that don't even
+            # decode because the position is mid-record — means a stale or
+            # corrupt index, and the fallback is the scan from byte 0 that was
+            # this method's whole body before A3. CorruptRecord is swallowed
+            # ONLY here: the log hasn't been convicted yet, the hint has. Once
+            # scanning from a verified boundary, corruption is the log's own
+            # and propagates.
+            try:
+                rec = Record.read_one(f)
+            except CorruptRecord:
+                rec = None
+            if rec is None or rec.offset != hint_offset:
+                f.seek(0)
+                rec = Record.read_one(f)
+            while rec is not None:
                 if rec.offset >= offset:
                     yield rec
+                rec = Record.read_one(f)
 
 
     def has_room_for(self, record: Record) -> bool:
