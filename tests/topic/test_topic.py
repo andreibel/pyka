@@ -102,6 +102,40 @@ def test_names_come_from_disk_not_the_cache(tmp_path):
     assert fresh.exists("orders")
 
 
+def test_names_skips_directories_the_filesystem_put_there(tmp_path):
+    """The data root is not ours alone.
+
+    Every cloud PersistentVolumeClaim is a freshly formatted ext4 volume, and
+    those arrive holding a `lost+found`; NFS volumes grow a `.snapshot`. No
+    test on a laptop can see this, because tmp_path is always empty.
+
+    Note `.snapshot` is a LEGAL topic name under validate_name — `.` is in the
+    charset and only "." and ".." are reserved — so filtering by name alone
+    was not enough. What actually distinguishes a topic is holding partitions.
+    """
+    t = topic(tmp_path)
+    t.create("orders")
+    (tmp_path / "data" / "lost+found").mkdir()
+    (tmp_path / "data" / ".snapshot").mkdir()
+
+    assert t.names() == ["orders"]
+
+
+def test_names_only_lists_topics_that_get_can_actually_open(tmp_path):
+    # The invariant behind the filter: every listed name must work. A listing
+    # that returns names the rest of the API rejects is incoherent.
+    t = topic(tmp_path)
+    t.create("orders")
+    t.create("clicks")
+    (tmp_path / "data" / "lost+found").mkdir()
+    (tmp_path / "data" / "half-made").mkdir()  # a topic dir with no partitions
+
+    for name in t.names():
+        assert t.exists(name)
+        assert t.get(name) is not None
+    assert t.names() == ["clicks", "orders"]
+
+
 def test_get_raises_for_an_unknown_topic(tmp_path):
     # Reads raise, appends create: a consumer naming a missing topic has
     # typo'd, and an empty auto-created topic would never tell it so.

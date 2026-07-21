@@ -46,6 +46,15 @@ def validate_name(name: str) -> None:
         raise ValueError(f"invalid topic name: {name!r}")
 
 
+def _is_valid_name(name: str) -> bool:
+    """validate_name as a predicate, for filtering rather than guarding."""
+    try:
+        validate_name(name)
+    except ValueError:
+        return False
+    return True
+
+
 @dataclass
 class _Partition:
     """One open Log plus the counters its sync policy reads.
@@ -107,8 +116,21 @@ class Topic:
         Read from the filesystem, not the cache: a topic exists because its
         directory does. Otherwise a fresh restart would report none until
         something happened to touch them.
+
+        A topic is a directory *containing partitions* — a structural test,
+        not a lexical one. The data root is not always ours alone: a freshly
+        formatted ext4 volume (every cloud PersistentVolumeClaim) arrives with
+        a ``lost+found``, and NFS volumes grow a ``.snapshot``. The second of
+        those is a perfectly legal topic name, so checking the name is not
+        enough — but neither directory holds partitions, and listing a name
+        that ``get()`` then rejects with UnknownTopic would make the API
+        disagree with itself.
         """
-        return sorted(p.name for p in self._root.iterdir() if p.is_dir())
+        return sorted(
+            p.name
+            for p in self._root.iterdir()
+            if p.is_dir() and _is_valid_name(p.name) and self._partition_dirs(p.name)
+        )
 
     def exists(self, name: str) -> bool:
         validate_name(name)
