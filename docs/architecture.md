@@ -112,10 +112,10 @@ design.** Agreement by construction.
 
 What that means concretely:
 
-- ❌ no cluster server to write
-- ❌ no cluster endpoints to design
-- ❌ no cluster objects beyond the 35-line `Ring`
-- ✅ one new RPC on the *existing* broker: `Metadata`, which every broker
+- **no** cluster server to write
+- **no** cluster endpoints to design
+- **no** cluster objects beyond the 35-line `Ring`
+- **yes:** one new RPC on the *existing* broker: `Metadata`, which every broker
   answers identically
 
 ---
