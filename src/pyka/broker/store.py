@@ -16,6 +16,7 @@ import asyncio
 import logging
 from pathlib import Path
 
+from pyka.broker.tail import Tail
 from pyka.cluster.ring import Ring
 from pyka.storage.record import Record
 from pyka.storage.types import Offset
@@ -36,11 +37,16 @@ class Store:
     ) -> None:
         self._topic = Topic(root, partitions, sync_policy, max_segment_bytes)
         self._ring = ring or Ring(brokers=1, me=0)
+        self._tail = Tail()
         self._ready = False
 
     @property
     def topic(self) -> Topic:
         return self._topic
+
+    @property
+    def tail(self) -> Tail:
+        return self._tail
 
     @property
     def ring(self) -> Ring:
@@ -70,6 +76,10 @@ class Store:
 
     async def close(self) -> None:
         self._ready = False
+        # Release parked live-tail streams first: otherwise server.stop(grace)
+        # sits out the whole grace period waiting for consumers that are, by
+        # design, waiting forever.
+        self._tail.close()
         await asyncio.to_thread(self._topic.close)
 
     # ------------------------------------------------------------ operations
@@ -87,7 +97,14 @@ class Store:
         value: bytes | None,
         timestamp: int | None = None,
     ) -> tuple[int, Offset]:
-        return await asyncio.to_thread(self._topic.append, name, key, value, timestamp)
+        partition, offset = await asyncio.to_thread(
+            self._topic.append, name, key, value, timestamp
+        )
+        # After the await, so back on the event loop — which is what makes a
+        # plain asyncio.Event safe. Every append must come through here or a
+        # live tail will miss it.
+        self._tail.notify(name, partition)
+        return partition, offset
 
     async def read(
         self, name: str, offset: Offset, partition: int = 0, limit: int = 0

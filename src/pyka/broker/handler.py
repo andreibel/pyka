@@ -10,6 +10,8 @@ Methods the contract declares but no milestone has implemented yet abort with
 UNIMPLEMENTED, naming the milestone. A client built against them gets a clear
 standard answer instead of a connection error or an invented shape.
 """
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 
 import grpc
@@ -30,6 +32,15 @@ Streaming must not slurp: a consumer reading a 1 GiB partition from offset 0
 cannot hold it in memory. Bigger batches mean fewer thread hops and more
 memory held at once; 500 records of a few hundred bytes is well under a
 megabyte, and the fixed cost of asyncio.to_thread is amortised over all of it.
+"""
+
+POLL_SECONDS = 30.0
+"""Backstop for a following stream that is waiting on an append.
+
+NOT the mechanism — Tail.notify is. This only bounds the damage if a
+notification is ever missed: a stream that would otherwise hang forever
+instead recovers within half a minute. If you find this timeout doing real
+work, there is a missing notify() to go and find.
 """
 
 
@@ -137,27 +148,46 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         BATCH. Between batches the event loop is free, so one consumer reading
         a huge partition does not stall every other connection.
         """
-        if request.follow:
-            await context.abort(
-                grpc.StatusCode.UNIMPLEMENTED, _NOT_YET.format(milestone="B4")
-            )
-
         offset = request.offset
-        remaining = request.max_records if request.max_records > 0 else None
+        # max_records is ignored while following — the contract says so, and a
+        # live tail that stops after N records is just a bounded read.
+        remaining = (
+            request.max_records
+            if request.max_records > 0 and not request.follow
+            else None
+        )
+        tail = self._store.tail
 
         while True:
             limit = BATCH if remaining is None else min(BATCH, remaining)
+            # Subscribe BEFORE reading. Reading first and subscribing second
+            # would miss an append landing in between: the notification fires
+            # while nobody holds the event, and the consumer then waits for a
+            # signal that has already gone.
+            waiter = tail.subscribe(request.topic, request.partition) if request.follow else None
+
             batch = await self._read(request, offset, limit, context)
             for record in batch:
                 yield _to_proto(record)
+            if batch:
+                offset = batch[-1].offset + 1
 
-            if len(batch) < limit:
-                break  # short batch means the log ended
-            offset = batch[-1].offset + 1
             if remaining is not None:
                 remaining -= len(batch)
                 if remaining <= 0:
-                    break
+                    return
+            if len(batch) == limit:
+                continue  # a full batch: more may already be waiting
+
+            # Short batch: caught up with the log.
+            if not request.follow:
+                return
+            if tail.closed:
+                return  # broker shutting down
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(waiter.wait(), POLL_SECONDS)
+            if tail.closed:
+                return
 
     async def _read(
         self,

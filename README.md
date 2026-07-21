@@ -437,7 +437,7 @@ invariant `PREFIX_SIZE + size == Record.size()` must always hold.
 - [x] B1b: FastAPI control plane on :8080, same process, shared `Topic`
 - [x] B2: `Produce` + `ProduceStream` append to a topic's log
 - [x] B3: `Consume` server-streams records from an offset
-- [ ] B4: live tail — `follow=true` keeps the stream open (`asyncio.Event` per partition)
+- [x] B4: live tail — `follow=true` keeps the stream open (`asyncio.Event` per partition)
 
 ### Phase D — Kubernetes (the deployment is the lesson)
 - [ ] D1: Dockerfile, non-root, `PYKA_DATA_DIR` as a volume
@@ -510,6 +510,7 @@ segments, probes). Interactive docs at <http://localhost:8080/docs>.
 ./scripts/demo.py produce orders user-1 hi  # gRPC
 ./scripts/demo.py bulk    orders 500        # gRPC streaming
 ./scripts/demo.py consume orders 0 0 20     # topic partition offset limit
+./scripts/demo.py tail    orders 0          # live: blocks, prints as records arrive
 ./scripts/demo.py topics
 ./scripts/demo.py show    orders 2          # the segment chain
 ```
@@ -551,7 +552,7 @@ grpcurl -plaintext localhost:9092 list
 
 ```sh
 uv sync                    # create the venv
-uv run pytest              # 400 tests
+uv run pytest              # 418 tests
 ./scripts/gen_proto.sh     # regenerate stubs after editing the .proto
 uv run python bench/bench_seek.py
 ```

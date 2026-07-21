@@ -4,6 +4,7 @@
     ./scripts/demo.py produce orders user-1 "hello world"
     ./scripts/demo.py bulk    orders 500
     ./scripts/demo.py consume orders 0 0 20      # topic partition offset limit
+    ./scripts/demo.py tail    orders 0          # live: blocks and waits
     ./scripts/demo.py topics
     ./scripts/demo.py show    orders 0
 
@@ -87,6 +88,31 @@ def consume(topic: str, partition: str = "0", offset: str = "0",
             print(f"  offset {record.offset:>6}  key {key:<12} {value}")
 
 
+def tail(topic: str, partition: str = "0", offset: str = "0") -> None:
+    """Live tail: catch up, then block until new records arrive. Ctrl-C to stop.
+
+    Run this in one terminal and `produce` in another.
+    """
+    print(f"following {topic}/{partition} from offset {offset} — Ctrl-C to stop")
+    with grpc.insecure_channel(GRPC) as channel:
+        stream = broker_pb2_grpc.BrokerStub(channel).Consume(
+            broker_pb2.ConsumeRequest(
+                topic=topic, partition=int(partition), offset=int(offset), follow=True
+            )
+        )
+        try:
+            for record in stream:
+                key = record.key.decode() if record.HasField("key") else "<none>"
+                value = (
+                    record.value.decode(errors="replace")[:40]
+                    if record.HasField("value")
+                    else "<TOMBSTONE>"
+                )
+                print(f"  offset {record.offset:>6}  key {key:<12} {value}", flush=True)
+        except KeyboardInterrupt:
+            print("\nstopped")
+
+
 def topics() -> None:
     print(json.dumps(_rest("/topics"), indent=2))
 
@@ -108,7 +134,7 @@ def show(topic: str, partition: str = "0") -> None:
 
 
 COMMANDS = {"produce": produce, "bulk": bulk, "consume": consume,
-            "topics": topics, "create": create, "show": show}
+            "tail": tail, "topics": topics, "create": create, "show": show}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:

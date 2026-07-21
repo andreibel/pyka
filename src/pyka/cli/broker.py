@@ -94,13 +94,24 @@ async def serve() -> None:
 
     await stop.wait()
 
-    # Order matters: stop taking work, drain what is in flight, then fsync and
-    # close the files. Reversed, an in-flight append would write to a closed
-    # segment. All of it must fit inside terminationGracePeriodSeconds or the
-    # SIGKILL lands mid-append and leaves a torn tail to recover.
+    # Order matters, in four steps:
+    #
+    #   1. stop being routed to      (health NOT_SERVING)
+    #   2. release parked live tails (they are in-flight RPCs waiting forever)
+    #   3. drain the rest            (stop(grace) waits for real work)
+    #   4. fsync and close files     (last: an in-flight append must not meet
+    #                                 a closed segment)
+    #
+    # Step 2 is not optional and its position is not arbitrary. A follow=true
+    # stream parked on an append is an in-flight RPC, so stop() waits for it —
+    # but only store.close() releases it, and that is step 4. Put them in the
+    # wrong order and shutdown blocks for the whole grace period, every time,
+    # on any broker with one live consumer. In Kubernetes that is a 30-second
+    # rolling update per pod, or a SIGKILL mid-append if the grace is shorter.
     log.info("shutting down")
     grpc_server.set_serving(False)
     admin.should_exit = True
+    store.tail.close()
     await asyncio.gather(
         grpc_server.stop(float(os.environ.get("PYKA_GRACE", DEFAULT_GRACE))),
         admin_task,
